@@ -56,3 +56,4 @@ htmlcov/
 
 # Docker
 docker/data/
+docker/.env

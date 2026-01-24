@@ -527,14 +527,17 @@ async def github_device_token(request: DeviceTokenRequest):
 
 # ============ GitHub Web Flow (for Web UI) ============
 
+# Backend callback URL for GitHub OAuth
+BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8080")
+
 @app.get("/api/auth/github")
 async def github_auth_redirect(redirect_uri: Optional[str] = None):
     """Redirect to GitHub OAuth authorization page."""
     import secrets
     state = secrets.token_urlsafe(32)
 
-    # Store redirect_uri in state if provided (for SPA)
-    callback_url = f"{FRONTEND_URL}/auth/callback" if redirect_uri else f"{FRONTEND_URL}/auth/callback"
+    # GitHub callback goes to backend first, then backend redirects to frontend
+    callback_url = f"{BACKEND_URL}/api/auth/callback/github"
 
     github_url = (
         f"https://github.com/login/oauth/authorize"
@@ -553,7 +556,8 @@ async def github_auth_callback(
 ):
     """Handle GitHub OAuth callback."""
     try:
-        callback_url = f"{FRONTEND_URL}/auth/callback"
+        # Use backend URL for token exchange (must match the redirect_uri used in authorize)
+        callback_url = f"{BACKEND_URL}/api/auth/callback/github"
 
         # Exchange code for access token
         result = await github_exchange_code(code, callback_url)
