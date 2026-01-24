@@ -21,6 +21,8 @@ async def init_db():
     db = await aiosqlite.connect(DATABASE_PATH)
     try:
         await db.execute("PRAGMA foreign_keys = ON")
+
+        # Create tables
         await db.executescript("""
             -- users: 用户表
             CREATE TABLE IF NOT EXISTS users (
@@ -38,13 +40,11 @@ async def init_db():
             -- sessions: 会话元信息
             CREATE TABLE IF NOT EXISTS sessions (
                 session_id TEXT PRIMARY KEY,
-                user_id TEXT,
                 summary TEXT,
                 first_message TEXT,
                 total_lines INTEGER DEFAULT 0,
                 created_at TEXT DEFAULT (datetime('now')),
-                updated_at TEXT DEFAULT (datetime('now')),
-                FOREIGN KEY (user_id) REFERENCES users(id)
+                updated_at TEXT DEFAULT (datetime('now'))
             );
 
             -- content: 会话内容（JSONL 整体存储）
@@ -84,9 +84,17 @@ async def init_db():
             -- 索引
             CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
             CREATE INDEX IF NOT EXISTS idx_segments_session ON segments(session_id);
-            CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
             CREATE INDEX IF NOT EXISTS idx_users_provider ON users(provider, provider_id);
         """)
+
+        # Migration: Add user_id column to sessions if not exists
+        cursor = await db.execute("PRAGMA table_info(sessions)")
+        columns = [row[1] for row in await cursor.fetchall()]
+
+        if "user_id" not in columns:
+            await db.execute("ALTER TABLE sessions ADD COLUMN user_id TEXT REFERENCES users(id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)")
+
         await db.commit()
     finally:
         await db.close()
