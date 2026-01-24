@@ -10,21 +10,20 @@ function formatTimeAgo(dateStr: string): string {
   const diffHours = Math.floor(diffMs / 3600000)
   const diffDays = Math.floor(diffMs / 86400000)
 
-  if (diffMins < 1) return 'just now'
-  if (diffMins < 60) return `${diffMins} min ago`
-  if (diffHours < 24) return `${diffHours} hour${diffHours > 1 ? 's' : ''} ago`
-  if (diffDays < 7) return `${diffDays} day${diffDays > 1 ? 's' : ''} ago`
+  if (diffMins < 1) return 'now'
+  if (diffMins < 60) return `${diffMins}m`
+  if (diffHours < 24) return `${diffHours}h`
+  if (diffDays < 7) return `${diffDays}d`
   return date.toLocaleDateString()
 }
 
 function getFolder(path: string | null): string {
-  if (!path) return 'Unknown'
-  // 提取最后两级目录
+  if (!path) return 'unknown'
   const parts = path.split('/').filter(Boolean)
   if (parts.length >= 2) {
     return parts.slice(-2).join('/')
   }
-  return parts[parts.length - 1] || 'Unknown'
+  return parts[parts.length - 1] || 'unknown'
 }
 
 interface GroupedData {
@@ -53,8 +52,7 @@ function SessionList() {
       setError(null)
       const response = await getGroupedSessions()
       setSessions(response.sessions)
-      // 默认展开所有机器
-      const machines = new Set(response.sessions.map(s => s.machine_name || 'Unknown'))
+      const machines = new Set(response.sessions.map(s => s.machine_name || 'unknown'))
       setExpandedMachines(machines)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load sessions')
@@ -115,10 +113,10 @@ function SessionList() {
     })
   }
 
-  // 按机器和目录分组
+  // Group by machine and directory
   const groupedData: GroupedData = {}
   for (const session of sessions) {
-    const machine = session.machine_name || 'Unknown'
+    const machine = session.machine_name || 'unknown'
     const folder = getFolder(session.original_path)
     if (!groupedData[machine]) {
       groupedData[machine] = {}
@@ -151,37 +149,37 @@ function SessionList() {
         <form className="search-box" onSubmit={handleSearch}>
           <input
             type="text"
-            placeholder="Search content..."
+            placeholder="$ grep -r 'search query'..."
             value={searchInput}
             onChange={e => setSearchInput(e.target.value)}
           />
-          <button type="submit" disabled={isSearching}>
-            {isSearching ? '...' : 'Search'}
+          <button type="submit" disabled={isSearching} className="primary">
+            {isSearching ? 'Searching' : 'Search'}
           </button>
           {searchResults !== null && (
             <button type="button" onClick={clearSearch} className="clear-btn">
-              Clear
+              ✕
             </button>
           )}
         </form>
       </header>
 
-      {error && <div className="error">{error}</div>}
+      {error && <div className="error">ERROR: {error}</div>}
 
-      {/* 搜索结果 */}
+      {/* Search Results */}
       {searchResults !== null && (
         <div className="search-results">
           <div className="search-header">
-            Found {searchResults.length} result{searchResults.length !== 1 ? 's' : ''} for "{searchInput}"
+            grep: {searchResults.length} match{searchResults.length !== 1 ? 'es' : ''} for "{searchInput}"
           </div>
           {searchResults.length === 0 ? (
             <div className="no-results">No matches found</div>
           ) : (
-            <div className="session-list">
+            <div className="session-list" style={{ paddingLeft: 0 }}>
               {searchResults.map(result => (
                 <div key={result.session_id} className="session-card search-result">
                   <Link to={`/sessions/${result.session_id}`}>
-                    <div className="session-id">{result.session_id}</div>
+                    <div className="session-id">{result.session_id.slice(0, 8)}</div>
                     {result.snippet && (
                       <div
                         className="session-snippet"
@@ -189,7 +187,7 @@ function SessionList() {
                       />
                     )}
                     <div className="session-meta">
-                      <span>Lines: {result.total_lines}</span>
+                      <span>{result.total_lines} lines</span>
                       <span>{result.machines || 'N/A'}</span>
                       <span>{formatTimeAgo(result.updated_at)}</span>
                     </div>
@@ -201,11 +199,11 @@ function SessionList() {
         </div>
       )}
 
-      {/* 分组显示 */}
+      {/* Grouped View */}
       {searchResults === null && !loading && (
         <div className="grouped-sessions">
           <div className="session-count">
-            {sessions.length} session{sessions.length !== 1 ? 's' : ''} total
+            {sessions.length} session{sessions.length !== 1 ? 's' : ''} synced
           </div>
 
           {Object.entries(groupedData).map(([machine, folders]) => (
@@ -217,9 +215,9 @@ function SessionList() {
                 <span className="toggle-icon">
                   {expandedMachines.has(machine) ? '▼' : '▶'}
                 </span>
-                <span className="machine-name">🖥 {machine}</span>
+                <span className="machine-name">{machine}</span>
                 <span className="machine-count">
-                  ({Object.values(folders).reduce((sum, f) => sum + f.sessions.length, 0)})
+                  {Object.values(folders).reduce((sum, f) => sum + f.sessions.length, 0)} sessions
                 </span>
               </div>
 
@@ -238,21 +236,21 @@ function SessionList() {
                             <span className="toggle-icon">
                               {isExpanded ? '▼' : '▶'}
                             </span>
-                            <span className="folder-name">📁 {folder}</span>
+                            <span className="folder-name">{folder}</span>
                             <span className="folder-count">
                               ({folderData.sessions.length})
                             </span>
                           </div>
                           {folderData.fullPath && (
                             <button
-                              className="copy-map-btn"
+                              className={`copy-map-btn ${copiedKey === folderKey ? 'copied' : ''}`}
                               onClick={(e) => {
                                 e.stopPropagation()
                                 copyMapCommand(machine, folderData.fullPath, folderKey)
                               }}
                               title={`Copy: claude-roam map add "${machine}:${folderData.fullPath}"`}
                             >
-                              {copiedKey === folderKey ? '✓ Copied' : '📋 Copy Map'}
+                              {copiedKey === folderKey ? '✓ copied' : 'copy map'}
                             </button>
                           )}
                         </div>
@@ -262,16 +260,16 @@ function SessionList() {
                             {folderData.sessions.map(session => (
                               <div key={session.session_id} className="session-card">
                                 <Link to={`/sessions/${session.session_id}`}>
-                                  <div className="session-id">{session.session_id}</div>
+                                  <div className="session-id">{session.session_id.slice(0, 8)}</div>
                                   {session.first_message && (
                                     <div className="session-message">
-                                      "{session.first_message.length > 200
-                                        ? session.first_message.slice(0, 200) + '...'
-                                        : session.first_message}"
+                                      {session.first_message.length > 120
+                                        ? session.first_message.slice(0, 120) + '...'
+                                        : session.first_message}
                                     </div>
                                   )}
                                   <div className="session-meta">
-                                    <span>Lines: {session.total_lines}</span>
+                                    <span>{session.total_lines} lines</span>
                                     <span>{formatTimeAgo(session.updated_at)}</span>
                                   </div>
                                 </Link>
@@ -289,10 +287,10 @@ function SessionList() {
         </div>
       )}
 
-      {loading && <div className="loading">Loading...</div>}
+      {loading && <div className="loading">Loading sessions</div>}
 
       {!loading && sessions.length === 0 && searchResults === null && (
-        <div className="loading">No sessions found</div>
+        <div className="loading">No sessions found. Run `claude-roam push` to sync.</div>
       )}
     </div>
   )
