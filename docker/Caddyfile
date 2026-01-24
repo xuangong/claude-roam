@@ -1,0 +1,13 @@
+:80 {
+    # API 路由到后端
+    handle /api/* {
+        reverse_proxy backend:8000
+    }
+
+    # 前端静态文件
+    handle {
+        root * /srv/web
+        try_files {path} /index.html
+        file_server
+    }
+}

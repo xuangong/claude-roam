@@ -1,0 +1,25 @@
+{
+  "name": "claude-roam",
+  "version": "0.1.0",
+  "description": "Claude Code session roaming sync CLI",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "claude-roam": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist --target bun",
+    "dev": "bun run src/index.ts",
+    "test": "bun test",
+    "test:coverage": "bun test --coverage",
+    "lint": "bunx @biomejs/biome check src",
+    "format": "bunx @biomejs/biome format --write src"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.0",
+    "@types/bun": "^1.1.0"
+  },
+  "dependencies": {
+    "commander": "^12.1.0"
+  }
+}

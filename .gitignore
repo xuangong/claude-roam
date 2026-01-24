@@ -1,0 +1,58 @@
+# OS files
+.DS_Store
+Thumbs.db
+
+# Node.js
+node_modules/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Bun
+bun.lockb
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+.uv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Build outputs
+cli/dist/
+web/dist/
+
+# Coverage
+coverage/
+.coverage
+htmlcov/
+
+# Test
+.pytest_cache/
+
+# Docker
+docker/data/

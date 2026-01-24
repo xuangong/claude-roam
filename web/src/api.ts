@@ -1,0 +1,156 @@
+/**
+ * API client for Claude Roam Web
+ */
+
+export interface Segment {
+  id: number;
+  from_line: number;
+  to_line: number;
+  machine_id: string;
+  machine_name: string | null;
+  platform: string | null;
+  original_path: string | null;
+  pushed_at: string;
+}
+
+export interface SessionMeta {
+  session_id: string;
+  summary: string | null;
+  first_message: string | null;
+  total_lines: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PullResponse {
+  data: string;
+  meta: SessionMeta;
+  segments: Segment[];
+}
+
+export interface SessionListItem {
+  session_id: string;
+  summary: string | null;
+  first_message: string | null;
+  total_lines: number;
+  created_at: string;
+  updated_at: string;
+  machines: string | null;
+  last_path: string | null;
+}
+
+export interface SessionListResponse {
+  sessions: SessionListItem[];
+  total: number;
+  page: number;
+  limit: number;
+  has_more: boolean;
+}
+
+export interface SessionDetailResponse {
+  session: SessionMeta;
+  segments: Segment[];
+}
+
+export interface SearchResultItem {
+  session_id: string;
+  summary: string | null;
+  first_message: string | null;
+  total_lines: number;
+  created_at: string;
+  updated_at: string;
+  machines: string | null;
+  last_path: string | null;
+  snippet: string | null;
+}
+
+export interface SearchResponse {
+  results: SearchResultItem[];
+  total: number;
+}
+
+export interface GroupedSessionItem {
+  session_id: string;
+  summary: string | null;
+  first_message: string | null;
+  total_lines: number;
+  created_at: string;
+  updated_at: string;
+  machine_name: string | null;
+  original_path: string | null;
+}
+
+export interface GroupedSessionsResponse {
+  sessions: GroupedSessionItem[];
+}
+
+const API_BASE = '/api';
+
+export async function listSessions(
+  query?: string,
+  limit = 50,
+  offset = 0
+): Promise<SessionListResponse> {
+  const params = new URLSearchParams();
+  if (query) params.set('q', query);
+  params.set('limit', limit.toString());
+  params.set('offset', offset.toString());
+
+  const response = await fetch(`${API_BASE}/sessions?${params.toString()}`);
+  if (!response.ok) {
+    throw new Error(`Failed to list sessions: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function getSessionDetail(
+  sessionId: string
+): Promise<SessionDetailResponse> {
+  const response = await fetch(`${API_BASE}/sessions/${sessionId}`);
+  if (!response.ok) {
+    throw new Error(`Failed to get session: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function pullSession(sessionId: string): Promise<PullResponse> {
+  const response = await fetch(`${API_BASE}/sessions/${sessionId}/pull`);
+  if (!response.ok) {
+    throw new Error(`Failed to pull session: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function deleteSession(sessionId: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/sessions/${sessionId}`, {
+    method: 'DELETE',
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to delete session: ${response.status}`);
+  }
+}
+
+export async function healthCheck(): Promise<boolean> {
+  try {
+    const response = await fetch(`${API_BASE}/health`);
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function searchContent(query: string): Promise<SearchResponse> {
+  const response = await fetch(`${API_BASE}/search?q=${encodeURIComponent(query)}`);
+  if (!response.ok) {
+    throw new Error(`Failed to search: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function getGroupedSessions(): Promise<GroupedSessionsResponse> {
+  const response = await fetch(`${API_BASE}/sessions/grouped`);
+  if (!response.ok) {
+    throw new Error(`Failed to get grouped sessions: ${response.status}`);
+  }
+  return response.json();
+}

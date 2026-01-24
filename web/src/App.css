@@ -1,0 +1,361 @@
+.app {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 2rem;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 2rem;
+}
+
+.header h1 {
+  font-size: 1.5rem;
+  color: #333;
+}
+
+.search-box {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.search-box input {
+  width: 300px;
+}
+
+.session-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.session-card {
+  border: 1px solid #e5e5e5;
+  border-radius: 8px;
+  padding: 1rem;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.session-card:hover {
+  border-color: #646cff;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.session-card a {
+  text-decoration: none;
+  color: inherit;
+}
+
+.session-id {
+  font-family: monospace;
+  font-size: 0.9rem;
+  color: #666;
+  margin-bottom: 0.5rem;
+}
+
+.session-message {
+  color: #333;
+  margin-bottom: 0.5rem;
+  word-break: break-word;
+  font-size: 0.95rem;
+  line-height: 1.6;
+}
+
+.session-meta {
+  display: flex;
+  gap: 1rem;
+  font-size: 0.85rem;
+  color: #888;
+}
+
+.loading {
+  text-align: center;
+  padding: 2rem;
+  color: #666;
+}
+
+.error {
+  text-align: center;
+  padding: 2rem;
+  color: #dc3545;
+}
+
+.load-more {
+  text-align: center;
+  margin-top: 1rem;
+}
+
+/* Detail page */
+.back-link {
+  display: inline-block;
+  margin-bottom: 1rem;
+}
+
+.detail-header {
+  margin-bottom: 2rem;
+}
+
+.detail-header h1 {
+  font-size: 1.2rem;
+  font-family: monospace;
+  margin-bottom: 0.5rem;
+}
+
+.detail-meta {
+  display: flex;
+  gap: 1rem;
+  font-size: 0.9rem;
+  color: #666;
+}
+
+.section {
+  margin-bottom: 2rem;
+}
+
+.section h2 {
+  font-size: 1rem;
+  color: #666;
+  border-bottom: 1px solid #e5e5e5;
+  padding-bottom: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.segments-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.segments-table th,
+.segments-table td {
+  padding: 0.5rem;
+  text-align: left;
+  border-bottom: 1px solid #e5e5e5;
+}
+
+.segments-table th {
+  color: #666;
+  font-weight: 500;
+}
+
+.preview-box {
+  background: #f8f9fa;
+  border: 1px solid #e5e5e5;
+  border-radius: 8px;
+  padding: 1.5rem;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+.message {
+  margin-bottom: 1rem;
+  padding: 0.5rem;
+  border-radius: 4px;
+}
+
+.message.user {
+  background: #e3f2fd;
+}
+
+.message.assistant {
+  background: #f5f5f5;
+}
+
+.message-role {
+  font-weight: 500;
+  font-size: 0.8rem;
+  color: #666;
+  margin-bottom: 0.25rem;
+}
+
+.message-content {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.pull-command {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.pull-command code {
+  flex: 1;
+  background: #f8f9fa;
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  font-family: monospace;
+  font-size: 0.9rem;
+  border: 1px solid #e5e5e5;
+}
+
+.copy-btn {
+  padding: 0.75rem 1rem;
+}
+
+.copy-btn.copied {
+  background: #28a745;
+  color: white;
+}
+
+/* Grouped Sessions */
+.grouped-sessions {
+  margin-top: 1rem;
+}
+
+.session-count {
+  color: #666;
+  margin-bottom: 1rem;
+  font-size: 0.9rem;
+}
+
+.machine-group {
+  margin-bottom: 1rem;
+  border: 1px solid #e5e5e5;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.machine-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem;
+  background: #f0f0f0;
+  cursor: pointer;
+  user-select: none;
+}
+
+.machine-header:hover {
+  background: #e8e8e8;
+}
+
+.machine-name {
+  font-weight: 600;
+  font-size: 1rem;
+}
+
+.machine-count {
+  color: #666;
+  font-size: 0.85rem;
+}
+
+.toggle-icon {
+  font-size: 0.7rem;
+  color: #666;
+  width: 1rem;
+}
+
+.folders {
+  padding-left: 1rem;
+}
+
+.folder-group {
+  border-top: 1px solid #e5e5e5;
+}
+
+.folder-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 1rem;
+  background: #fafafa;
+  cursor: pointer;
+  user-select: none;
+  flex: 1;
+}
+
+.folder-header:hover {
+  background: #f5f5f5;
+}
+
+.folder-header-row {
+  display: flex;
+  align-items: center;
+  background: #fafafa;
+}
+
+.folder-header-row:hover {
+  background: #f5f5f5;
+}
+
+.copy-map-btn {
+  padding: 0.4rem 0.8rem;
+  margin-right: 0.5rem;
+  font-size: 0.75rem;
+  background: #646cff;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.copy-map-btn:hover {
+  background: #535bf2;
+}
+
+.folder-name {
+  font-size: 0.9rem;
+  color: #444;
+}
+
+.folder-count {
+  color: #888;
+  font-size: 0.8rem;
+}
+
+.folder-group .session-list {
+  padding: 0.5rem 1rem 1rem;
+}
+
+.folder-group .session-card {
+  margin-bottom: 0.5rem;
+}
+
+/* Search Results */
+.search-results {
+  margin-top: 1rem;
+}
+
+.search-header {
+  font-size: 0.95rem;
+  color: #333;
+  margin-bottom: 1rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid #e5e5e5;
+}
+
+.no-results {
+  text-align: center;
+  padding: 2rem;
+  color: #666;
+}
+
+.session-snippet {
+  font-size: 0.9rem;
+  color: #555;
+  background: #fffbeb;
+  padding: 0.75rem;
+  border-radius: 4px;
+  margin-bottom: 0.5rem;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.session-snippet mark {
+  background: #fef08a;
+  padding: 0 2px;
+  border-radius: 2px;
+}
+
+.clear-btn {
+  background: #f0f0f0;
+  color: #666;
+}
+
+.clear-btn:hover {
+  background: #e0e0e0;
+}
