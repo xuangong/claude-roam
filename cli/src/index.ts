@@ -233,6 +233,7 @@ program
       process.exit(1);
     }
 
+    const state = loadState();
     const concurrency = parseInt(options.concurrency) || 20;
     const skipConfirm = options.yes || false;
 
@@ -276,27 +277,58 @@ program
       const mapping = getDirMapping(currentDir);
 
       if (!mapping) {
+        // No mapping found - check if this is the same machine
+        // If so, we can pull directly without needing a mapping
         console.log("No mapping found for current directory.");
-        console.log("\nTo pull sessions, you need to establish a directory mapping first:");
-        console.log("  claude-roam map add \"machine_name:/original/path\"");
-        console.log("\nExample:");
-        console.log("  claude-roam map add \"alice-mac:/Users/alice/projects/foo\"");
-        console.log("\nThis maps your current directory to a cloud directory,");
-        console.log("allowing you to pull and push sessions across machines.");
-        return;
-      }
+        console.log("Checking if sessions exist from this machine...\n");
 
-      const parsed = parseRemoteDir(mapping);
-      if (!parsed) {
-        console.error("Invalid mapping format. Please remove and re-add the mapping.");
-        process.exit(1);
-      }
+        // Try to pull sessions from the same machine with the same path
+        const localMachineName = state.machine_name;
+        try {
+          const remoteSessions = await listSessionsByDir(localMachineName, currentDir);
+          if (remoteSessions.length > 0) {
+            console.log(`Found ${remoteSessions.length} session(s) from this machine (${localMachineName}).`);
+            console.log("Since this is the same machine, no mapping needed.\n");
+            mappingsToProcess.push({
+              localDir: currentDir,
+              machine: localMachineName,
+              remotePath: currentDir,
+            });
+          } else {
+            // No sessions from this machine either
+            console.log("No sessions found from this machine for this directory.");
+            console.log("\nTo pull sessions from a different machine, establish a directory mapping:");
+            console.log("  claude-roam map add \"machine_name:/original/path\"");
+            console.log("\nExample:");
+            console.log("  claude-roam map add \"alice-mac:/Users/alice/projects/foo\"");
+            console.log("\nThis maps your current directory to a cloud directory,");
+            console.log("allowing you to pull sessions across machines.");
+            return;
+          }
+        } catch (err) {
+          // API error - fall back to the original message
+          console.log("Failed to check remote sessions:", err);
+          console.log("\nTo pull sessions, you need to establish a directory mapping first:");
+          console.log("  claude-roam map add \"machine_name:/original/path\"");
+          console.log("\nExample:");
+          console.log("  claude-roam map add \"alice-mac:/Users/alice/projects/foo\"");
+          console.log("\nThis maps your current directory to a cloud directory,");
+          console.log("allowing you to pull and push sessions across machines.");
+          return;
+        }
+      } else {
+        const parsed = parseRemoteDir(mapping);
+        if (!parsed) {
+          console.error("Invalid mapping format. Please remove and re-add the mapping.");
+          process.exit(1);
+        }
 
-      mappingsToProcess.push({
-        localDir: currentDir,
-        machine: parsed.machine,
-        remotePath: parsed.path,
-      });
+        mappingsToProcess.push({
+          localDir: currentDir,
+          machine: parsed.machine,
+          remotePath: parsed.path,
+        });
+      }
     }
 
     // Fetch sessions for each mapping
