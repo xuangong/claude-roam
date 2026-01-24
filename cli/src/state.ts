@@ -12,12 +12,25 @@ export interface SessionState {
   localPath: string;
 }
 
+export interface AuthState {
+  token: string;
+  user: {
+    id: string;
+    provider: string;
+    name: string | null;
+    email: string | null;
+    avatar_url: string | null;
+  };
+}
+
 export interface State {
   machine_id: string;
   machine_name: string;
   // 目录映射：本地目录 -> 云端目录标识 ("machine_name:original_path")
   dirMappings: Record<string, string>;
   sessions: Record<string, SessionState>;
+  // 认证信息
+  auth?: AuthState;
 }
 
 const STATE_DIR = path.join(os.homedir(), ".claude-roam");
@@ -152,4 +165,40 @@ export function parseRemoteDir(remoteDir: string): { machine: string; path: stri
     machine: remoteDir.slice(0, colonIndex),
     path: remoteDir.slice(colonIndex + 1),
   };
+}
+
+
+// ============ Auth functions ============
+
+/**
+ * Save auth state
+ */
+export function saveAuth(auth: AuthState): void {
+  const state = loadState();
+  state.auth = auth;
+  saveState(state);
+}
+
+/**
+ * Get auth state
+ */
+export function getAuth(): AuthState | undefined {
+  const state = loadState();
+  return state.auth;
+}
+
+/**
+ * Clear auth state (logout)
+ */
+export function clearAuth(): void {
+  const state = loadState();
+  delete state.auth;
+  saveState(state);
+}
+
+/**
+ * Check if user is logged in
+ */
+export function isLoggedIn(): boolean {
+  return !!getAuth()?.token;
 }

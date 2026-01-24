@@ -1,11 +1,13 @@
 """FastAPI main application for Claude Roam."""
 
 import json
+import os
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 
 from .db import (
     add_segment,
@@ -26,6 +28,10 @@ from .db import (
     update_session_metadata,
 )
 from .models import (
+    DeviceCodeRequest,
+    DeviceCodeResponse,
+    DeviceTokenRequest,
+    DeviceTokenResponse,
     ErrorResponse,
     GroupedSessionItem,
     GroupedSessionsResponse,
@@ -41,6 +47,19 @@ from .models import (
     SessionListResponse,
     SessionMeta,
     SessionsByDirResponse,
+    TokenResponse,
+    User,
+    UserResponse,
+)
+from .auth import (
+    create_jwt_token,
+    create_user_from_github,
+    get_current_user,
+    github_check_device_token,
+    github_exchange_code,
+    github_get_user,
+    github_request_device_code,
+    GITHUB_CLIENT_ID,
 )
 
 
@@ -400,3 +419,168 @@ async def search_sessions(
         )
     finally:
         await db.close()
+
+
+# ============ Auth Endpoints ============
+
+# Frontend URL for redirects
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:5173")
+
+
+@app.get("/api/auth/me", response_model=UserResponse)
+async def get_me(authorization: Optional[str] = Header(None)):
+    """Get current user info."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    token = authorization.replace("Bearer ", "")
+    user = await get_current_user(token)
+
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    return UserResponse(
+        user=User(
+            id=user["id"],
+            provider=user["provider"],
+            provider_id=user["provider_id"],
+            email=user["email"],
+            name=user["name"],
+            avatar_url=user["avatar_url"],
+            created_at=user["created_at"],
+            updated_at=user["updated_at"],
+        )
+    )
+
+
+# ============ GitHub Device Flow (for CLI) ============
+
+@app.post("/api/auth/device/github", response_model=DeviceCodeResponse)
+async def github_device_code():
+    """Request a device code from GitHub for CLI login."""
+    try:
+        result = await github_request_device_code()
+        return DeviceCodeResponse(
+            device_code=result["device_code"],
+            user_code=result["user_code"],
+            verification_uri=result["verification_uri"],
+            expires_in=result["expires_in"],
+            interval=result["interval"],
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get device code: {e}")
+
+
+@app.post("/api/auth/device/github/token", response_model=DeviceTokenResponse)
+async def github_device_token(request: DeviceTokenRequest):
+    """Check if device code has been authorized."""
+    try:
+        result = await github_check_device_token(request.device_code)
+
+        # Check for errors
+        if "error" in result:
+            error = result["error"]
+            if error == "authorization_pending":
+                return DeviceTokenResponse(status="pending")
+            elif error == "slow_down":
+                return DeviceTokenResponse(status="pending")
+            elif error == "expired_token":
+                return DeviceTokenResponse(status="expired")
+            elif error == "access_denied":
+                raise HTTPException(status_code=403, detail="Access denied by user")
+            else:
+                raise HTTPException(status_code=400, detail=result.get("error_description", error))
+
+        # Success - we have an access token
+        access_token = result.get("access_token")
+        if not access_token:
+            return DeviceTokenResponse(status="pending")
+
+        # Get user info from GitHub
+        github_user = await github_get_user(access_token)
+
+        # Create or update user in our database
+        user = await create_user_from_github(github_user)
+
+        # Create our JWT token
+        jwt_token = create_jwt_token(user["id"])
+
+        return DeviceTokenResponse(
+            status="completed",
+            access_token=jwt_token,
+            user=User(
+                id=user["id"],
+                provider=user["provider"],
+                provider_id=user["provider_id"],
+                email=user["email"],
+                name=user["name"],
+                avatar_url=user["avatar_url"],
+                created_at=user["created_at"],
+                updated_at=user["updated_at"],
+            ),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to check token: {e}")
+
+
+# ============ GitHub Web Flow (for Web UI) ============
+
+@app.get("/api/auth/github")
+async def github_auth_redirect(redirect_uri: Optional[str] = None):
+    """Redirect to GitHub OAuth authorization page."""
+    import secrets
+    state = secrets.token_urlsafe(32)
+
+    # Store redirect_uri in state if provided (for SPA)
+    callback_url = f"{FRONTEND_URL}/auth/callback" if redirect_uri else f"{FRONTEND_URL}/auth/callback"
+
+    github_url = (
+        f"https://github.com/login/oauth/authorize"
+        f"?client_id={GITHUB_CLIENT_ID}"
+        f"&redirect_uri={callback_url}"
+        f"&scope=read:user%20user:email"
+        f"&state={state}"
+    )
+    return RedirectResponse(url=github_url)
+
+
+@app.get("/api/auth/callback/github")
+async def github_auth_callback(
+    code: str = Query(...),
+    state: Optional[str] = Query(None),
+):
+    """Handle GitHub OAuth callback."""
+    try:
+        callback_url = f"{FRONTEND_URL}/auth/callback"
+
+        # Exchange code for access token
+        result = await github_exchange_code(code, callback_url)
+
+        if "error" in result:
+            raise HTTPException(status_code=400, detail=result.get("error_description", result["error"]))
+
+        access_token = result.get("access_token")
+        if not access_token:
+            raise HTTPException(status_code=400, detail="No access token received")
+
+        # Get user info from GitHub
+        github_user = await github_get_user(access_token)
+
+        # Create or update user in our database
+        user = await create_user_from_github(github_user)
+
+        # Create our JWT token
+        jwt_token = create_jwt_token(user["id"])
+
+        # Redirect to frontend with token
+        return RedirectResponse(
+            url=f"{FRONTEND_URL}/auth/callback?token={jwt_token}"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        return RedirectResponse(
+            url=f"{FRONTEND_URL}/auth/callback?error={str(e)}"
+        )

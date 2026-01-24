@@ -154,3 +154,86 @@ export async function getGroupedSessions(): Promise<GroupedSessionsResponse> {
   }
   return response.json();
 }
+
+
+// ============ Auth API ============
+
+export interface User {
+  id: string;
+  provider: string;
+  provider_id: string;
+  email: string | null;
+  name: string | null;
+  avatar_url: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface UserResponse {
+  user: User;
+}
+
+/**
+ * Get current user info
+ */
+export async function getCurrentUser(): Promise<User | null> {
+  const token = localStorage.getItem('auth_token');
+  if (!token) return null;
+
+  try {
+    const response = await fetch(`${API_BASE}/auth/me`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    if (response.status === 401) {
+      localStorage.removeItem('auth_token');
+      return null;
+    }
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const data: UserResponse = await response.json();
+    return data.user;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Logout - clear token
+ */
+export function logout(): void {
+  localStorage.removeItem('auth_token');
+}
+
+/**
+ * Get GitHub login URL
+ */
+export function getGitHubLoginUrl(): string {
+  return `${API_BASE}/auth/github`;
+}
+
+/**
+ * Save auth token
+ */
+export function saveAuthToken(token: string): void {
+  localStorage.setItem('auth_token', token);
+}
+
+/**
+ * Get auth token
+ */
+export function getAuthToken(): string | null {
+  return localStorage.getItem('auth_token');
+}
+
+/**
+ * Check if user is logged in
+ */
+export function isLoggedIn(): boolean {
+  return !!getAuthToken();
+}

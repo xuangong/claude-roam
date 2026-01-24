@@ -146,3 +146,70 @@ class SessionsByDirResponse(BaseModel):
     """Response for sessions by directory endpoint."""
 
     sessions: list[SessionListItem]
+
+
+# ============ Auth Models ============
+
+class User(BaseModel):
+    """User model."""
+
+    id: str
+    provider: str
+    provider_id: str
+    email: Optional[str] = None
+    name: Optional[str] = None
+    avatar_url: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+
+class UserResponse(BaseModel):
+    """Response for user info endpoint."""
+
+    user: User
+
+
+class TokenResponse(BaseModel):
+    """Response for token endpoint."""
+
+    access_token: str
+    token_type: str = "bearer"
+    user: User
+
+
+class DeviceCodeRequest(BaseModel):
+    """Request for device code."""
+
+    provider: str  # 'github' | 'google'
+
+
+class DeviceCodeResponse(BaseModel):
+    """Response for device code request."""
+
+    device_code: str
+    user_code: str
+    verification_uri: str
+    expires_in: int
+    interval: int
+
+
+class DeviceTokenRequest(BaseModel):
+    """Request to check device code status."""
+
+    device_code: str
+    provider: str
+
+
+class DeviceTokenResponse(BaseModel):
+    """Response for device token check."""
+
+    status: str  # 'pending' | 'completed' | 'expired'
+    access_token: Optional[str] = None
+    user: Optional[User] = None
+
+
+class OAuthCallbackRequest(BaseModel):
+    """Request for OAuth callback."""
+
+    code: str
+    state: Optional[str] = None

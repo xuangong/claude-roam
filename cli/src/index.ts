@@ -13,6 +13,9 @@ import {
   listSessionsByDir,
   listSessionsGrouped,
   healthCheck,
+  requestDeviceCode,
+  pollDeviceToken,
+  getCurrentUser,
 } from "./api.js";
 import { startDaemon } from "./daemon.js";
 import {
@@ -36,6 +39,11 @@ import {
   getDirMapping,
   getAllDirMappings,
   parseRemoteDir,
+  saveAuth,
+  getAuth,
+  clearAuth,
+  isLoggedIn,
+  AuthState,
 } from "./state.js";
 
 const program = new Command();
@@ -877,6 +885,142 @@ mapCommand
     console.log("Current directory mapping:");
     console.log(`  Local:  ${currentDir}`);
     console.log(`  Cloud:  ${mapping}`);
+  });
+
+// Login command
+program
+  .command("login")
+  .description("Login with GitHub")
+  .action(async () => {
+    if (!process.env.ROAM_API) {
+      console.error("Error: ROAM_API environment variable not set");
+      process.exit(1);
+    }
+
+    // Check if already logged in
+    const auth = getAuth();
+    if (auth) {
+      console.log(`Already logged in as ${auth.user.name || auth.user.email || auth.user.id}`);
+      console.log("Use 'claude-roam logout' to logout first.");
+      return;
+    }
+
+    // Check server health
+    const healthy = await healthCheck();
+    if (!healthy) {
+      console.error("Error: Cannot connect to server");
+      process.exit(1);
+    }
+
+    console.log("Logging in with GitHub...\n");
+
+    try {
+      // Request device code
+      const deviceCode = await requestDeviceCode();
+
+      console.log("Please visit the following URL in your browser:");
+      console.log(`\n  ${deviceCode.verification_uri}\n`);
+      console.log(`And enter the code: ${deviceCode.user_code}\n`);
+
+      // Also try to open browser automatically
+      const openCmd = process.platform === "darwin" ? "open" :
+                      process.platform === "win32" ? "start" : "xdg-open";
+      try {
+        Bun.spawn([openCmd, deviceCode.verification_uri]);
+      } catch {
+        // Ignore if browser can't be opened
+      }
+
+      // Poll for token
+      const interval = deviceCode.interval || 5;
+      const expiresAt = Date.now() + deviceCode.expires_in * 1000;
+
+      process.stdout.write("Waiting for authorization");
+
+      while (Date.now() < expiresAt) {
+        await Bun.sleep(interval * 1000);
+        process.stdout.write(".");
+
+        const result = await pollDeviceToken(deviceCode.device_code);
+
+        if (result.status === "completed" && result.access_token && result.user) {
+          console.log(" ✓\n");
+
+          // Save auth state
+          const authState: AuthState = {
+            token: result.access_token,
+            user: {
+              id: result.user.id,
+              provider: result.user.provider,
+              name: result.user.name,
+              email: result.user.email,
+              avatar_url: result.user.avatar_url,
+            },
+          };
+          saveAuth(authState);
+
+          console.log(`Logged in as: ${result.user.name || result.user.email || result.user.id} (GitHub)`);
+          console.log("Token saved to ~/.claude-roam/state.json");
+          return;
+        } else if (result.status === "expired") {
+          console.log(" ✗\n");
+          console.error("Error: Authorization expired. Please try again.");
+          process.exit(1);
+        }
+        // status === "pending" -> continue polling
+      }
+
+      console.log(" ✗\n");
+      console.error("Error: Authorization timed out. Please try again.");
+      process.exit(1);
+    } catch (err) {
+      console.error(`\nError: ${err}`);
+      process.exit(1);
+    }
+  });
+
+// Logout command
+program
+  .command("logout")
+  .description("Logout and clear stored credentials")
+  .action(() => {
+    const auth = getAuth();
+
+    if (!auth) {
+      console.log("Not logged in.");
+      return;
+    }
+
+    clearAuth();
+    console.log(`Logged out from ${auth.user.name || auth.user.email || auth.user.id}`);
+  });
+
+// Whoami command
+program
+  .command("whoami")
+  .description("Show current logged in user")
+  .action(async () => {
+    const auth = getAuth();
+
+    if (!auth) {
+      console.log("Not logged in.");
+      console.log("\nUse 'claude-roam login' to login with GitHub.");
+      return;
+    }
+
+    console.log("Current user:");
+    console.log(`  Name:     ${auth.user.name || "(not set)"}`);
+    console.log(`  Email:    ${auth.user.email || "(not set)"}`);
+    console.log(`  Provider: ${auth.user.provider}`);
+    console.log(`  ID:       ${auth.user.id}`);
+
+    // Optionally verify token with server
+    if (process.env.ROAM_API) {
+      const user = await getCurrentUser(auth.token);
+      if (!user) {
+        console.log("\n⚠️  Token may be expired. Use 'claude-roam login' to re-authenticate.");
+      }
+    }
   });
 
 program.parse();

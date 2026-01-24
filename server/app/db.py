@@ -22,14 +22,29 @@ async def init_db():
     try:
         await db.execute("PRAGMA foreign_keys = ON")
         await db.executescript("""
+            -- users: 用户表
+            CREATE TABLE IF NOT EXISTS users (
+                id TEXT PRIMARY KEY,
+                provider TEXT NOT NULL,
+                provider_id TEXT NOT NULL,
+                email TEXT,
+                name TEXT,
+                avatar_url TEXT,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(provider, provider_id)
+            );
+
             -- sessions: 会话元信息
             CREATE TABLE IF NOT EXISTS sessions (
                 session_id TEXT PRIMARY KEY,
+                user_id TEXT,
                 summary TEXT,
                 first_message TEXT,
                 total_lines INTEGER DEFAULT 0,
                 created_at TEXT DEFAULT (datetime('now')),
-                updated_at TEXT DEFAULT (datetime('now'))
+                updated_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (user_id) REFERENCES users(id)
             );
 
             -- content: 会话内容（JSONL 整体存储）
@@ -69,6 +84,8 @@ async def init_db():
             -- 索引
             CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
             CREATE INDEX IF NOT EXISTS idx_segments_session ON segments(session_id);
+            CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+            CREATE INDEX IF NOT EXISTS idx_users_provider ON users(provider, provider_id);
         """)
         await db.commit()
     finally:
@@ -444,3 +461,104 @@ async def get_sessions_by_dir(
     )
     rows = await cursor.fetchall()
     return [dict(row) for row in rows]
+
+
+# ============ User functions ============
+
+async def create_or_update_user(
+    db: aiosqlite.Connection,
+    user_id: str,
+    provider: str,
+    provider_id: str,
+    email: Optional[str] = None,
+    name: Optional[str] = None,
+    avatar_url: Optional[str] = None,
+) -> dict:
+    """Create or update a user."""
+    await db.execute(
+        """
+        INSERT INTO users (id, provider, provider_id, email, name, avatar_url)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(provider, provider_id) DO UPDATE SET
+            email = excluded.email,
+            name = excluded.name,
+            avatar_url = excluded.avatar_url,
+            updated_at = datetime('now')
+        """,
+        (user_id, provider, provider_id, email, name, avatar_url),
+    )
+    await db.commit()
+    return await get_user_by_provider(db, provider, provider_id)
+
+
+async def get_user_by_id(db: aiosqlite.Connection, user_id: str) -> Optional[dict]:
+    """Get user by ID."""
+    cursor = await db.execute(
+        "SELECT * FROM users WHERE id = ?",
+        (user_id,),
+    )
+    row = await cursor.fetchone()
+    if row:
+        return dict(row)
+    return None
+
+
+async def get_user_by_provider(
+    db: aiosqlite.Connection,
+    provider: str,
+    provider_id: str,
+) -> Optional[dict]:
+    """Get user by provider and provider_id."""
+    cursor = await db.execute(
+        "SELECT * FROM users WHERE provider = ? AND provider_id = ?",
+        (provider, provider_id),
+    )
+    row = await cursor.fetchone()
+    if row:
+        return dict(row)
+    return None
+
+
+async def get_sessions_by_user(
+    db: aiosqlite.Connection,
+    user_id: str,
+    limit: int = 50,
+    offset: int = 0,
+) -> tuple[list[dict], int]:
+    """Get sessions for a specific user."""
+    # Get total count
+    count_cursor = await db.execute(
+        "SELECT COUNT(*) FROM sessions WHERE user_id = ?",
+        (user_id,),
+    )
+    total = (await count_cursor.fetchone())[0]
+
+    cursor = await db.execute(
+        """
+        SELECT s.*,
+               GROUP_CONCAT(DISTINCT seg.machine_name) as machines,
+               (SELECT original_path FROM segments WHERE session_id = s.session_id ORDER BY pushed_at DESC LIMIT 1) as last_path
+        FROM sessions s
+        LEFT JOIN segments seg ON s.session_id = seg.session_id
+        WHERE s.user_id = ?
+        GROUP BY s.session_id
+        ORDER BY s.updated_at DESC
+        LIMIT ? OFFSET ?
+        """,
+        (user_id, limit, offset),
+    )
+    rows = await cursor.fetchall()
+    return [dict(row) for row in rows], total
+
+
+async def update_session_user(
+    db: aiosqlite.Connection,
+    session_id: str,
+    user_id: str,
+) -> None:
+    """Associate a session with a user."""
+    await db.execute(
+        "UPDATE sessions SET user_id = ? WHERE session_id = ?",
+        (user_id, session_id),
+    )
+    await db.commit()

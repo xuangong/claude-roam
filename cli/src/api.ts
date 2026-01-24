@@ -252,3 +252,101 @@ export async function listSessionsGrouped(): Promise<GroupedSessionItem[]> {
     return data.sessions;
   });
 }
+
+
+// ============ Auth API ============
+
+export interface DeviceCodeResponse {
+  device_code: string;
+  user_code: string;
+  verification_uri: string;
+  expires_in: number;
+  interval: number;
+}
+
+export interface UserInfo {
+  id: string;
+  provider: string;
+  provider_id: string;
+  email: string | null;
+  name: string | null;
+  avatar_url: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DeviceTokenResponse {
+  status: "pending" | "completed" | "expired";
+  access_token?: string;
+  user?: UserInfo;
+}
+
+/**
+ * Request a device code for GitHub login
+ */
+export async function requestDeviceCode(): Promise<DeviceCodeResponse> {
+  const url = `${getApiUrl()}/api/auth/device/github`;
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Failed to get device code: ${response.status} ${text}`);
+  }
+
+  return (await response.json()) as DeviceCodeResponse;
+}
+
+/**
+ * Poll for device token (check if user has authorized)
+ */
+export async function pollDeviceToken(deviceCode: string): Promise<DeviceTokenResponse> {
+  const url = `${getApiUrl()}/api/auth/device/github/token`;
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      device_code: deviceCode,
+      provider: "github",
+    }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Failed to check token: ${response.status} ${text}`);
+  }
+
+  return (await response.json()) as DeviceTokenResponse;
+}
+
+/**
+ * Get current user info
+ */
+export async function getCurrentUser(token: string): Promise<UserInfo | null> {
+  const url = `${getApiUrl()}/api/auth/me`;
+
+  try {
+    const response = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    if (response.status === 401) {
+      return null;
+    }
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const data = await response.json();
+    return data.user as UserInfo;
+  } catch {
+    return null;
+  }
+}
