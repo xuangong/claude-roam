@@ -1,8 +1,43 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
-import { Link, useParams } from 'react-router-dom'
-import { getSessionDetail, pullSession, type SessionDetailResponse, type Segment } from '../api'
+import { useState, useRef, useEffect, useCallback } from 'react'
 
-// Content block types for terminal display
+// Roam bundle types
+export interface RoamSession {
+  id: string
+  lineCount: number
+  modifiedAt: string
+  data: string
+}
+
+export interface RoamBundleV1 {
+  version: 1
+  exportedAt: string
+  source: {
+    machineId: string
+    machineName: string
+    originalPath: string
+  }
+  session: {
+    id: string
+    lineCount: number
+    modifiedAt: string
+  }
+  data: string
+}
+
+export interface RoamBundleV2 {
+  version: 2
+  exportedAt: string
+  source: {
+    machineId: string
+    machineName: string
+    originalPath: string
+  }
+  sessions: RoamSession[]
+}
+
+export type RoamBundle = RoamBundleV1 | RoamBundleV2
+
+// ========== Reuse message parsing and display from SessionDetail ==========
 interface TextBlock {
   type: 'text'
   content: string
@@ -23,19 +58,16 @@ interface ToolResultBlock {
 }
 
 type ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock
-
-// Display types for the terminal - clearer naming for LLM chatbot
 type DisplayType = 'human' | 'assistant' | 'tool_call' | 'tool_result' | 'system'
 
 interface DisplayMessage {
   displayType: DisplayType
   blocks: ContentBlock[]
-  toolName?: string  // For tool_call and tool_result
-  toolId?: string    // To link tool_call with tool_result
-  raw?: Record<string, unknown>  // For system/other messages
+  toolName?: string
+  toolId?: string
+  raw?: Record<string, unknown>
 }
 
-// Store tool_use info to link with results
 interface ToolUseInfo {
   id: string
   name: string
@@ -44,8 +76,6 @@ interface ToolUseInfo {
 function parseMessages(data: string): DisplayMessage[] {
   const messages: DisplayMessage[] = []
   const lines = data.split('\n').filter(line => line.trim())
-
-  // Track tool_use IDs to their names for linking with results
   const toolUseMap = new Map<string, ToolUseInfo>()
 
   for (const line of lines) {
@@ -53,22 +83,13 @@ function parseMessages(data: string): DisplayMessage[] {
       const obj = JSON.parse(line)
       const topType = obj.type as string
 
-      // Skip internal types
-      if (topType === 'file-history-snapshot' || topType === 'queue-operation') {
-        continue
-      }
+      if (topType === 'file-history-snapshot' || topType === 'queue-operation') continue
 
-      // Handle system messages (hooks, etc.)
       if (topType === 'system') {
-        messages.push({
-          displayType: 'system',
-          blocks: [],
-          raw: obj
-        })
+        messages.push({ displayType: 'system', blocks: [], raw: obj })
         continue
       }
 
-      // Handle summary
       if (topType === 'summary') {
         messages.push({
           displayType: 'system',
@@ -78,12 +99,10 @@ function parseMessages(data: string): DisplayMessage[] {
         continue
       }
 
-      // Handle user/assistant messages
       if ((topType === 'user' || topType === 'assistant') && obj.message) {
         const msg = obj.message
         const content = msg.content
 
-        // Parse content blocks
         const textBlocks: ContentBlock[] = []
         const toolUseBlocks: ContentBlock[] = []
         const toolResultBlocks: ContentBlock[] = []
@@ -99,7 +118,6 @@ function parseMessages(data: string): DisplayMessage[] {
             } else if (item.type === 'tool_use') {
               const toolId = item.id || ''
               const toolName = item.name || 'unknown_tool'
-              // Store for linking with results
               toolUseMap.set(toolId, { id: toolId, name: toolName })
               toolUseBlocks.push({
                 type: 'tool_use',
@@ -128,16 +146,10 @@ function parseMessages(data: string): DisplayMessage[] {
           }
         }
 
-        // Create display messages based on content types
-        // User + text = Human
         if (topType === 'user' && textBlocks.length > 0) {
-          messages.push({
-            displayType: 'human',
-            blocks: textBlocks
-          })
+          messages.push({ displayType: 'human', blocks: textBlocks })
         }
 
-        // User + tool_result = Tool Result (with linked tool name)
         if (topType === 'user' && toolResultBlocks.length > 0) {
           for (const block of toolResultBlocks) {
             if (block.type === 'tool_result') {
@@ -152,15 +164,10 @@ function parseMessages(data: string): DisplayMessage[] {
           }
         }
 
-        // Assistant + text = Assistant
         if (topType === 'assistant' && textBlocks.length > 0) {
-          messages.push({
-            displayType: 'assistant',
-            blocks: textBlocks
-          })
+          messages.push({ displayType: 'assistant', blocks: textBlocks })
         }
 
-        // Assistant + tool_use = Tool Call
         if (topType === 'assistant' && toolUseBlocks.length > 0) {
           for (const block of toolUseBlocks) {
             if (block.type === 'tool_use') {
@@ -193,11 +200,10 @@ function formatDateTime(dateStr: string): string {
   })
 }
 
-// Tool call display - shows what Claude is invoking
+// ========== Tool display components (same as SessionDetail) ==========
 function ToolCallDisplay({ name, input }: { name: string; input: Record<string, unknown> }) {
   const [isExpanded, setIsExpanded] = useState(false)
 
-  // Custom JSON formatter that displays string values with actual newlines/tabs
   const formatInputForDisplay = (obj: Record<string, unknown>, indent = 0): string => {
     const spaces = '  '.repeat(indent)
     const lines: string[] = ['{']
@@ -208,15 +214,12 @@ function ToolCallDisplay({ name, input }: { name: string; input: Record<string, 
       const keyStr = `${spaces}  "${key}": `
 
       if (typeof value === 'string') {
-        // For strings, show the actual content (newlines rendered, not escaped)
         if (value.includes('\n') || value.length > 80) {
-          // Multi-line string: show as block
           lines.push(`${keyStr}`)
           lines.push(`${spaces}    \`\`\``)
           lines.push(value)
           lines.push(`${spaces}    \`\`\`${comma}`)
         } else {
-          // Short string: show inline
           lines.push(`${keyStr}"${value}"${comma}`)
         }
       } else if (value === null) {
@@ -238,7 +241,6 @@ function ToolCallDisplay({ name, input }: { name: string; input: Record<string, 
 
   const inputStr = formatInputForDisplay(input)
 
-  // Get a preview of the most relevant input parameter
   const getInputPreview = () => {
     if (input.command) return String(input.command).slice(0, 60).replace(/\n/g, ' ')
     if (input.file_path) return String(input.file_path)
@@ -258,35 +260,19 @@ function ToolCallDisplay({ name, input }: { name: string; input: Record<string, 
 
   return (
     <div className="tool-call-block">
-      <div
-        className="tool-call-header"
-        onClick={() => setIsExpanded(!isExpanded)}
-      >
+      <div className="tool-call-header" onClick={() => setIsExpanded(!isExpanded)}>
         <span className="tool-call-arrow">→</span>
         <span className="tool-call-label">Tool Call</span>
         <span className="tool-call-name">{name}</span>
-        {preview && !isExpanded && (
-          <span className="tool-call-preview">{preview}</span>
-        )}
+        {preview && !isExpanded && <span className="tool-call-preview">{preview}</span>}
         <span className="tool-call-expand">{isExpanded ? '▲' : '▼'}</span>
       </div>
-      {isExpanded && (
-        <pre className="tool-call-input">{inputStr}</pre>
-      )}
+      {isExpanded && <pre className="tool-call-input">{inputStr}</pre>}
     </div>
   )
 }
 
-// Tool result display - shows what the tool returned (collapsed by default)
-function ToolResultDisplay({
-  content,
-  is_error,
-  toolName
-}: {
-  content: string
-  is_error?: boolean
-  toolName?: string
-}) {
+function ToolResultDisplay({ content, is_error, toolName }: { content: string; is_error?: boolean; toolName?: string }) {
   const [isExpanded, setIsExpanded] = useState(false)
   const lines = content.split('\n')
   const previewLines = lines.slice(0, 3).join('\n')
@@ -294,70 +280,45 @@ function ToolResultDisplay({
 
   return (
     <div className={`tool-result-block ${is_error ? 'error' : ''}`}>
-      <div
-        className="tool-result-header"
-        onClick={() => setIsExpanded(!isExpanded)}
-        style={{ cursor: 'pointer' }}
-      >
+      <div className="tool-result-header" onClick={() => setIsExpanded(!isExpanded)} style={{ cursor: 'pointer' }}>
         <span className="tool-result-arrow">←</span>
-        <span className="tool-result-label">
-          {is_error ? 'Error' : 'Result'}
-        </span>
-        {toolName && (
-          <span className="tool-result-from">from {toolName}</span>
-        )}
-        <span className="tool-result-meta">
-          {lines.length} lines
-        </span>
+        <span className="tool-result-label">{is_error ? 'Error' : 'Result'}</span>
+        {toolName && <span className="tool-result-from">from {toolName}</span>}
+        <span className="tool-result-meta">{lines.length} lines</span>
         <span className="tool-result-icon">{is_error ? '✗' : '✓'}</span>
         <span className="tool-result-expand">{isExpanded ? '▲' : '▼'}</span>
       </div>
-      {isExpanded && (
-        <pre className="tool-content">{content}</pre>
-      )}
-      {!isExpanded && hasMore && (
-        <pre className="tool-content tool-content-preview">{previewLines}...</pre>
-      )}
-      {!isExpanded && !hasMore && (
-        <pre className="tool-content tool-content-preview">{content}</pre>
-      )}
+      {isExpanded && <pre className="tool-content">{content}</pre>}
+      {!isExpanded && hasMore && <pre className="tool-content tool-content-preview">{previewLines}...</pre>}
+      {!isExpanded && !hasMore && <pre className="tool-content tool-content-preview">{content}</pre>}
     </div>
   )
 }
 
-// System message display (collapsed by default)
 function SystemDisplay({ raw }: { raw?: Record<string, unknown> }) {
   const [isExpanded, setIsExpanded] = useState(false)
   const subtype = (raw?.subtype as string) || (raw?.type as string) || 'system'
 
   return (
     <div className="system-block">
-      <div
-        className="system-block-header"
-        onClick={() => setIsExpanded(!isExpanded)}
-      >
+      <div className="system-block-header" onClick={() => setIsExpanded(!isExpanded)}>
         <span className="system-block-icon">⚙</span>
         <span className="system-block-label">System</span>
         <span className="system-block-subtype">{subtype}</span>
         <span className="system-block-expand">{isExpanded ? '▲' : '▼'}</span>
       </div>
-      {isExpanded && raw && (
-        <pre className="system-block-content">
-          {JSON.stringify(raw, null, 2)}
-        </pre>
-      )}
+      {isExpanded && raw && <pre className="system-block-content">{JSON.stringify(raw, null, 2)}</pre>}
     </div>
   )
 }
 
-// MiniMap item info
+// ========== MiniMap component (same as SessionDetail) ==========
 interface MiniMapItem {
   type: DisplayType
   index: number
-  heightRatio: number  // 0-1, ratio of total conversation height
+  heightRatio: number
 }
 
-// MiniMap component
 function MiniMap({
   items,
   visibleStart,
@@ -365,8 +326,8 @@ function MiniMap({
   onNavigate
 }: {
   items: MiniMapItem[]
-  visibleStart: number  // 0-1, where visible area starts
-  visibleEnd: number    // 0-1, where visible area ends
+  visibleStart: number
+  visibleEnd: number
   onNavigate: (ratio: number) => void
 }) {
   const minimapRef = useRef<HTMLDivElement>(null)
@@ -377,7 +338,6 @@ function MiniMap({
   const dragOffset = useRef({ x: 0, y: 0 })
   const [, forceUpdate] = useState(0)
 
-  // Position and size state (load from localStorage)
   const [position, setPosition] = useState(() => {
     const saved = localStorage.getItem('minimap-position')
     return saved ? JSON.parse(saved) : { top: 200, right: 24 }
@@ -387,7 +347,6 @@ function MiniMap({
     return saved ? parseInt(saved) : 500
   })
 
-  // Save to localStorage
   useEffect(() => {
     localStorage.setItem('minimap-position', JSON.stringify(position))
   }, [position])
@@ -397,27 +356,21 @@ function MiniMap({
   }, [height])
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
-    // Check if clicking on resize handle
     const target = e.target as HTMLElement
     if (target.classList.contains('minimap-resize-handle')) {
       isResizing.current = true
       e.preventDefault()
       return
     }
-    // Check if clicking on move handle
     if (target.classList.contains('minimap-move-handle')) {
       isMoving.current = true
       if (minimapRef.current) {
         const rect = minimapRef.current.getBoundingClientRect()
-        dragOffset.current = {
-          x: e.clientX - rect.left,
-          y: e.clientY - rect.top
-        }
+        dragOffset.current = { x: e.clientX - rect.left, y: e.clientY - rect.top }
       }
       e.preventDefault()
       return
     }
-    // Otherwise, navigate
     isDragging.current = true
     handleNavigateClick(e)
   }, [])
@@ -481,12 +434,10 @@ function MiniMap({
     }
   }, [])
 
-  // Force re-render when height changes to recalculate viewport
   useEffect(() => {
     forceUpdate(n => n + 1)
   }, [height])
 
-  // Get actual content area dimensions from ref
   const [contentRect, setContentRect] = useState({ top: 20, height: height - 40 })
 
   useEffect(() => {
@@ -495,10 +446,7 @@ function MiniMap({
         const rect = contentRef.current?.getBoundingClientRect()
         const parentRect = minimapRef.current?.getBoundingClientRect()
         if (rect && parentRect) {
-          setContentRect({
-            top: rect.top - parentRect.top,
-            height: rect.height
-          })
+          setContentRect({ top: rect.top - parentRect.top, height: rect.height })
         }
       }
       updateRect()
@@ -508,7 +456,6 @@ function MiniMap({
     }
   }, [height, items])
 
-  // Viewport position based on actual measured content area
   const viewportTop = contentRect.top + visibleStart * contentRect.height
   const viewportHeight = (visibleEnd - visibleStart) * contentRect.height
 
@@ -516,49 +463,103 @@ function MiniMap({
     <div
       className="minimap"
       ref={minimapRef}
-      style={{
-        top: `${position.top}px`,
-        right: `${position.right}px`,
-        height: `${height}px`,
-        maxHeight: 'none'
-      }}
+      style={{ top: `${position.top}px`, right: `${position.right}px`, height: `${height}px`, maxHeight: 'none' }}
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
     >
       <div className="minimap-move-handle" title="Drag to move">⋮⋮</div>
       <div className="minimap-content" ref={contentRef}>
         {items.map((item, i) => (
-          <div
-            key={i}
-            className={`minimap-item minimap-${item.type}`}
-            style={{ flex: `${item.heightRatio} 0 0` }}
-          />
+          <div key={i} className={`minimap-item minimap-${item.type}`} style={{ flex: `${item.heightRatio} 0 0` }} />
         ))}
       </div>
-      <div
-        className="minimap-viewport"
-        style={{
-          top: `${viewportTop}px`,
-          height: `${viewportHeight}px`
-        }}
-      />
+      <div className="minimap-viewport" style={{ top: `${viewportTop}px`, height: `${viewportHeight}px` }} />
       <div className="minimap-resize-handle" title="Drag to resize">═</div>
     </div>
   )
 }
 
-function SessionDetail() {
-  const { id } = useParams<{ id: string }>()
-  const [detail, setDetail] = useState<SessionDetailResponse | null>(null)
-  const [messages, setMessages] = useState<DisplayMessage[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+// ========== Session List View (similar to SessionList) ==========
+function SessionListView({
+  sessions,
+  source,
+  minLines,
+  onMinLinesChange,
+  onSelectSession
+}: {
+  sessions: RoamSession[]
+  source: { machineName: string; originalPath: string }
+  minLines: number
+  onMinLinesChange: (n: number) => void
+  onSelectSession: (s: RoamSession) => void
+}) {
+  const filteredSessions = sessions.filter(s => s.lineCount >= minLines)
 
-  // MiniMap state - track conversation area visibility
+  return (
+    <>
+      <div className="detail-header">
+        <h1>Roam Preview</h1>
+        <div className="detail-meta">
+          <span>Source: {source.machineName}:{source.originalPath}</span>
+          <span>{filteredSessions.length} of {sessions.length} sessions</span>
+        </div>
+      </div>
+
+      <div className="section">
+        <div className="filter-box" style={{ marginBottom: 'var(--space-4)' }}>
+          <label htmlFor="minLines">Min lines:</label>
+          <input
+            id="minLines"
+            type="number"
+            min="0"
+            value={minLines || ''}
+            onChange={e => onMinLinesChange(parseInt(e.target.value) || 0)}
+            placeholder="0"
+          />
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+          {filteredSessions.map((s) => (
+            <div
+              key={s.id}
+              className="session-card"
+              onClick={() => onSelectSession(s)}
+              style={{ cursor: 'pointer' }}
+            >
+              <div style={{ flex: 1 }}>
+                <div className="session-id">{s.id}</div>
+                <div className="session-meta">
+                  <span>{s.lineCount} lines</span>
+                  <span>{formatDateTime(s.modifiedAt)}</span>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </>
+  )
+}
+
+// ========== Session Detail View (same rendering as SessionDetail) ==========
+function SessionDetailView({
+  session,
+  source,
+  onBack
+}: {
+  session: RoamSession
+  source: { machineName: string; originalPath: string }
+  onBack: () => void
+}) {
+  const [messages, setMessages] = useState<DisplayMessage[]>([])
   const conversationRef = useRef<HTMLDivElement>(null)
-  const [visibleStart, setVisibleStart] = useState(0) // 0-1, portion of conversation above viewport
-  const [visibleEnd, setVisibleEnd] = useState(1)     // 0-1, portion of conversation visible end
+  const [visibleStart, setVisibleStart] = useState(0)
+  const [visibleEnd, setVisibleEnd] = useState(1)
   const [minimapItems, setMinimapItems] = useState<MiniMapItem[]>([])
+
+  useEffect(() => {
+    setMessages(parseMessages(session.data))
+  }, [session])
 
   // Measure actual message heights after render
   useEffect(() => {
@@ -575,33 +576,22 @@ function SessionDetail() {
       if (totalHeight <= 0 || children.length === 0) return
 
       const items: MiniMapItem[] = []
-      let sumRatio = 0
       for (let i = 0; i < children.length && i < messages.length; i++) {
         const child = children[i] as HTMLElement
         const childRect = child.getBoundingClientRect()
         const childTop = childRect.top + window.scrollY - containerTop
-
-        // Calculate the ratio including the gap space after this element
         const nextChildTop = i < children.length - 1
           ? (children[i + 1] as HTMLElement).getBoundingClientRect().top + window.scrollY - containerTop
           : totalHeight
         const heightWithGap = nextChildTop - childTop
         const ratio = heightWithGap / totalHeight
-        sumRatio += ratio
 
-        items.push({
-          type: messages[i].displayType,
-          index: i,
-          heightRatio: ratio
-        })
+        items.push({ type: messages[i].displayType, index: i, heightRatio: ratio })
       }
       setMinimapItems(items)
     }
 
-    // Measure after DOM settles
     const timer = setTimeout(measureHeights, 100)
-
-    // Re-measure on resize
     const resizeObserver = new ResizeObserver(measureHeights)
     resizeObserver.observe(conversationRef.current)
 
@@ -611,29 +601,17 @@ function SessionDetail() {
     }
   }, [messages])
 
-  // Handle scroll - calculate which portion of conversation is visible
   const handleScroll = useCallback(() => {
     if (!conversationRef.current) return
 
     const rect = conversationRef.current.getBoundingClientRect()
-    // Use scrollHeight to match minimap item measurement
     const conversationHeight = conversationRef.current.scrollHeight
     const viewportHeight = window.innerHeight
 
     if (conversationHeight <= 0) return
 
-    // rect.top: distance from viewport top to conversation top
-    // When conversation top is above viewport: rect.top < 0
-    // When conversation top is below viewport: rect.top > 0
-
-    // visibleTop: how much of conversation is above the viewport (hidden at top)
     const visibleTop = Math.max(0, -rect.top)
-
-    // visibleBottom: how far into conversation the viewport bottom reaches
-    // viewportHeight - rect.top = distance from conversation top to viewport bottom
     const visibleBottom = Math.min(conversationHeight, Math.max(0, viewportHeight - rect.top))
-
-    // Convert to ratios (0-1)
     const startRatio = visibleTop / conversationHeight
     const endRatio = visibleBottom / conversationHeight
 
@@ -641,15 +619,12 @@ function SessionDetail() {
     setVisibleEnd(Math.max(0, Math.min(1, endRatio)))
   }, [])
 
-  // Navigate via minimap - scroll to show that portion of conversation
   const handleMinimapNavigate = useCallback((ratio: number) => {
     if (!conversationRef.current) return
 
     const rect = conversationRef.current.getBoundingClientRect()
     const conversationHeight = conversationRef.current.scrollHeight
     const targetOffset = ratio * conversationHeight
-
-    // Calculate where to scroll the page
     const currentTop = window.scrollY + rect.top
     const targetScroll = currentTop + targetOffset - window.innerHeight / 3
 
@@ -666,88 +641,19 @@ function SessionDetail() {
     }
   }, [handleScroll, messages])
 
-  useEffect(() => {
-    if (!id) return
-
-    async function fetchData() {
-      try {
-        setLoading(true)
-        setError(null)
-        const [detailResp, pullResp] = await Promise.all([
-          getSessionDetail(id!),
-          pullSession(id!)
-        ])
-        setDetail(detailResp)
-        setMessages(parseMessages(pullResp.data))
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to load session')
-      } finally {
-        setLoading(false)
-      }
-    }
-
-    fetchData()
-  }, [id])
-
-  if (loading) {
-    return (
-      <div className="detail-page">
-        <Link to="/" className="back-link">Back to sessions</Link>
-        <div className="loading">Loading session</div>
-      </div>
-    )
-  }
-
-  if (error) {
-    return (
-      <div className="detail-page">
-        <Link to="/" className="back-link">Back to sessions</Link>
-        <div className="error">ERROR: {error}</div>
-      </div>
-    )
-  }
-
-  if (!detail) {
-    return null
-  }
-
   return (
-    <div className="detail-page">
-      <Link to="/" className="back-link">Back to sessions</Link>
+    <>
+      <button onClick={onBack} className="back-link" style={{ background: 'none', border: 'none', padding: 0 }}>
+        Back to session list
+      </button>
 
       <div className="detail-header">
-        <h1>{detail.session.session_id}</h1>
+        <h1>{session.id}</h1>
         <div className="detail-meta">
-          <span>{detail.session.total_lines} lines</span>
-          <span>Created: {formatDateTime(detail.session.created_at)}</span>
-          <span>Updated: {formatDateTime(detail.session.updated_at)}</span>
+          <span>{session.lineCount} lines</span>
+          <span>Modified: {formatDateTime(session.modifiedAt)}</span>
+          <span>Source: {source.machineName}</span>
         </div>
-      </div>
-
-      <div className="section">
-        <h2>Source History</h2>
-        <table className="segments-table">
-          <thead>
-            <tr>
-              <th>Lines</th>
-              <th>Machine</th>
-              <th>Path</th>
-              <th>Pushed</th>
-            </tr>
-          </thead>
-          <tbody>
-            {detail.segments.map((seg: Segment) => (
-              <tr key={seg.id}>
-                <td>{seg.from_line}–{seg.to_line}</td>
-                <td>{seg.machine_name || seg.machine_id.slice(0, 8)}</td>
-                <td style={{ maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  {seg.original_path || '—'}
-                </td>
-                <td>{formatDateTime(seg.pushed_at)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
       </div>
 
       <div className="section conversation-section">
@@ -755,71 +661,44 @@ function SessionDetail() {
         <div className="conversation-container">
           <div className="conversation-flow" ref={conversationRef}>
             {messages.length === 0 ? (
-              <div className="empty-conversation">
-                No conversation data to display
-              </div>
+              <div className="empty-conversation">No conversation data to display</div>
             ) : (
               messages.map((msg, i) => {
-                // Human message - user input text
                 if (msg.displayType === 'human') {
                   return (
                     <div key={i} className="message human">
-                      <div className="message-role">
-                        <span className="role-icon">❯</span> Human
-                      </div>
+                      <div className="message-role"><span className="role-icon">❯</span> Human</div>
                       <div className="message-content">
-                        {msg.blocks.map((b, j) => (
-                          b.type === 'text' ? <span key={j}>{b.content}</span> : null
-                        ))}
+                        {msg.blocks.map((b, j) => b.type === 'text' ? <span key={j}>{b.content}</span> : null)}
                       </div>
                     </div>
                   )
                 }
-
-                // Assistant message - Claude's text response
                 if (msg.displayType === 'assistant') {
                   return (
                     <div key={i} className="message assistant">
-                      <div className="message-role">
-                        <span className="role-icon">◆</span> Assistant
-                      </div>
+                      <div className="message-role"><span className="role-icon">◆</span> Assistant</div>
                       <div className="message-content">
-                        {msg.blocks.map((b, j) => (
-                          b.type === 'text' ? <span key={j}>{b.content}</span> : null
-                        ))}
+                        {msg.blocks.map((b, j) => b.type === 'text' ? <span key={j}>{b.content}</span> : null)}
                       </div>
                     </div>
                   )
                 }
-
-                // Tool call - Claude invoking a tool
                 if (msg.displayType === 'tool_call') {
                   const block = msg.blocks[0]
                   if (block?.type === 'tool_use') {
                     return <ToolCallDisplay key={i} name={block.name} input={block.input} />
                   }
                 }
-
-                // Tool result - Result returned from tool
                 if (msg.displayType === 'tool_result') {
                   const block = msg.blocks[0]
                   if (block?.type === 'tool_result') {
-                    return (
-                      <ToolResultDisplay
-                        key={i}
-                        content={block.content}
-                        is_error={block.is_error}
-                        toolName={msg.toolName}
-                      />
-                    )
+                    return <ToolResultDisplay key={i} content={block.content} is_error={block.is_error} toolName={msg.toolName} />
                   }
                 }
-
-                // System messages - collapsed by default
                 if (msg.displayType === 'system') {
                   return <SystemDisplay key={i} raw={msg.raw} />
                 }
-
                 return null
               })
             )}
@@ -834,8 +713,52 @@ function SessionDetail() {
           )}
         </div>
       </div>
+    </>
+  )
+}
+
+// ========== Main RoamPreviewCore component ==========
+interface RoamPreviewCoreProps {
+  bundle: RoamBundle
+  sessions: RoamSession[]
+}
+
+function RoamPreviewCore({ bundle, sessions }: RoamPreviewCoreProps) {
+  const [selectedSession, setSelectedSession] = useState<RoamSession | null>(null)
+  const [minLines, setMinLines] = useState(() => {
+    const saved = localStorage.getItem('minLines')
+    return saved ? parseInt(saved) : 0
+  })
+
+  useEffect(() => {
+    localStorage.setItem('minLines', String(minLines))
+  }, [minLines])
+
+  // Viewing a specific session
+  if (selectedSession) {
+    return (
+      <div className="detail-page">
+        <SessionDetailView
+          session={selectedSession}
+          source={bundle.source}
+          onBack={() => setSelectedSession(null)}
+        />
+      </div>
+    )
+  }
+
+  // Session list view
+  return (
+    <div className="detail-page">
+      <SessionListView
+        sessions={sessions}
+        source={bundle.source}
+        minLines={minLines}
+        onMinLinesChange={setMinLines}
+        onSelectSession={setSelectedSession}
+      />
     </div>
   )
 }
 
-export default SessionDetail
+export default RoamPreviewCore

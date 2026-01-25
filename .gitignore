@@ -44,7 +44,10 @@ venv/
 
 # Build outputs
 cli/dist/
+cli/claude-roam
 web/dist/
+web/dist-preview/
+*.roam
 
 # Coverage
 coverage/

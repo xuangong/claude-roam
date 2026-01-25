@@ -251,6 +251,113 @@ T4: 机器 B push lines 11-25  → segments: [{1-10, A}, {11-25, B}]
 
 ---
 
+### F8: 导出/导入 (Export/Import)
+
+**描述**: 将会话数据导出为便携式 `.roam` 文件，支持离线分享和跨设备传输。
+
+**用户故事**:
+- 作为用户，我希望将当前目录的会话导出为单个文件，方便备份和分享
+- 作为用户，我希望在新机器上导入 `.roam` 文件恢复会话
+
+**命令**:
+```bash
+claude-roam export                    # 导出当前目录的所有 session
+claude-roam export -o <file.roam>     # 指定输出文件名
+claude-roam export -s <session-id>    # 导出指定 session
+
+claude-roam import <file.roam>        # 导入到当前目录
+claude-roam import <file.roam> -y     # 跳过确认
+```
+
+**文件格式** (`.roam`):
+```json
+{
+  "version": 2,
+  "exportedAt": "2026-01-25T10:00:00Z",
+  "source": {
+    "machineId": "xxx",
+    "machineName": "alice-mac",
+    "originalPath": "/Users/alice/projects/foo"
+  },
+  "sessions": [
+    {
+      "id": "session-uuid",
+      "lineCount": 100,
+      "modifiedAt": "2026-01-25T09:00:00Z",
+      "data": "jsonl content..."
+    }
+  ]
+}
+```
+
+**验收标准**:
+- [x] 导出文件包含完整会话数据
+- [x] 导入时写入正确的 Claude 目录
+- [x] 支持单 session 和多 session 导出
+
+---
+
+### F9: 本地预览 (Preview)
+
+**描述**: 在浏览器中预览当前目录或 `.roam` 文件的会话内容，无需服务器。
+
+**用户故事**:
+- 作为用户，我希望快速预览本地会话内容
+- 作为用户，我希望在没有网络的情况下也能浏览会话历史
+
+**命令**:
+```bash
+claude-roam preview                   # 预览当前目录的所有 session
+claude-roam preview <file.roam>       # 预览指定 .roam 文件
+```
+
+**技术实现**:
+- 使用 `vite-plugin-singlefile` 生成单文件 HTML
+- HTML 模板嵌入到 CLI 可执行文件中
+- 数据通过 Base64 编码注入到 HTML
+- 支持暗色/亮色主题切换
+- 复用 Web UI 的消息解析和 MiniMap 组件
+
+**验收标准**:
+- [x] 自动打开浏览器显示预览
+- [x] 支持中文内容正确显示
+- [x] 支持暗色/亮色主题
+- [x] 无需网络连接即可工作
+
+---
+
+### F10: GitHub OAuth 认证
+
+**描述**: 使用 GitHub 账号登录，保护数据安全。
+
+**用户故事**:
+- 作为用户，我希望使用 GitHub 账号登录，无需单独注册
+- 作为用户，我希望我的会话数据与我的账号绑定
+
+**CLI 登录流程**:
+```bash
+claude-roam login                     # 开始登录
+# 显示：请访问 https://github.com/login/device 并输入代码: XXXX-XXXX
+# 等待用户授权后自动完成登录
+
+claude-roam logout                    # 登出
+claude-roam whoami                    # 显示当前登录用户
+```
+
+**技术实现**:
+- 使用 GitHub Device Flow (OAuth 2.0)
+- Token 存储在 `~/.claude-roam/state.json`
+- API 请求自动携带 Authorization header
+- Web UI 使用重定向方式登录
+
+**验收标准**:
+- [x] CLI 支持 Device Flow 登录
+- [x] Web UI 支持 OAuth 重定向登录
+- [x] Session 数据与用户绑定
+- [x] 未登录时 push/pull 提示登录
+
+---
+
 ## 非功能需求
 
 ### 性能
@@ -323,6 +430,10 @@ T4: 机器 B push lines 11-25  → segments: [{1-10, A}, {11-25, B}]
 | M6 | 目录映射系统 | 完成 |
 | M7 | 并行上传/下载 | 完成 |
 | M8 | 本地清理命令 | 完成 |
+| M9 | 导出/导入功能 | 完成 |
+| M10 | 本地预览功能 | 完成 |
+| M11 | GitHub OAuth 认证 | 完成 |
+| M12 | 跨平台构建 | 完成 |
 
 ---
 

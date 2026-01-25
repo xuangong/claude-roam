@@ -5,7 +5,7 @@ import os
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query, Header, Request
+from fastapi import FastAPI, HTTPException, Query, Header, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
@@ -20,12 +20,17 @@ from .db import (
     get_session,
     get_sessions,
     get_sessions_by_dir,
+    get_sessions_by_user,
     get_sessions_grouped,
     init_db,
     search_content,
     truncate_content,
     update_content,
     update_session_metadata,
+    update_session_user,
+    get_pinned_folders,
+    add_pinned_folder,
+    remove_pinned_folder,
 )
 from .models import (
     DeviceCodeRequest,
@@ -50,6 +55,9 @@ from .models import (
     TokenResponse,
     User,
     UserResponse,
+    PinnedFolder,
+    PinnedFoldersResponse,
+    PinFolderRequest,
 )
 from .auth import (
     create_jwt_token,
@@ -59,8 +67,34 @@ from .auth import (
     github_exchange_code,
     github_get_user,
     github_request_device_code,
+    verify_jwt_token,
     GITHUB_CLIENT_ID,
 )
+
+
+# ============ Auth Dependencies ============
+
+async def require_auth(authorization: Optional[str] = Header(None)) -> dict:
+    """Require authentication and return user info."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    token = authorization.replace("Bearer ", "")
+    user = await get_current_user(token)
+
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    return user
+
+
+async def optional_auth(authorization: Optional[str] = Header(None)) -> Optional[dict]:
+    """Optional authentication - returns user if authenticated, None otherwise."""
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+
+    token = authorization.replace("Bearer ", "")
+    return await get_current_user(token)
 
 
 def extract_first_user_message(jsonl_data: str) -> Optional[str]:
@@ -122,10 +156,14 @@ async def health_check():
 @app.post(
     "/api/sessions/{session_id}/push",
     response_model=PushResponse,
-    responses={400: {"model": ErrorResponse}},
+    responses={400: {"model": ErrorResponse}, 401: {"model": ErrorResponse}},
 )
-async def push_session(session_id: str, request: PushRequest):
-    """Push session content (incremental)."""
+async def push_session(
+    session_id: str,
+    request: PushRequest,
+    user: dict = Depends(require_auth),
+):
+    """Push session content (incremental). Requires authentication."""
     db = await get_db()
     try:
         session = await get_session(db, session_id)
@@ -138,6 +176,8 @@ async def push_session(session_id: str, request: PushRequest):
             # 创建新session
             first_message = extract_first_user_message(request.append_data)
             await create_session(db, session_id, first_message=first_message)
+            # 关联用户
+            await update_session_user(db, session_id, user["id"])
             await update_content(db, session_id, request.append_data.strip(), new_line_count)
             await add_segment(
                 db,
@@ -150,6 +190,14 @@ async def push_session(session_id: str, request: PushRequest):
                 original_path=request.source.original_path,
             )
         else:
+            # 检查 session 是否属于当前用户
+            if session.get("user_id") and session["user_id"] != user["id"]:
+                raise HTTPException(status_code=403, detail="Session belongs to another user")
+
+            # 如果 session 没有关联用户，关联当前用户
+            if not session.get("user_id"):
+                await update_session_user(db, session_id, user["id"])
+
             current_lines = session["total_lines"]
             current_content = await get_content(db, session_id) or ""
 
@@ -196,18 +244,23 @@ async def push_session(session_id: str, request: PushRequest):
 @app.get(
     "/api/sessions/{session_id}/pull",
     response_model=PullResponse,
-    responses={404: {"model": ErrorResponse}},
+    responses={404: {"model": ErrorResponse}, 401: {"model": ErrorResponse}},
 )
 async def pull_session(
     session_id: str,
     from_line: Optional[int] = Query(None, ge=1, description="Start from line number"),
+    user: dict = Depends(require_auth),
 ):
-    """Pull session content."""
+    """Pull session content. Requires authentication."""
     db = await get_db()
     try:
         session = await get_session(db, session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="Session not found")
+
+        # 检查 session 是否属于当前用户
+        if session.get("user_id") and session["user_id"] != user["id"]:
+            raise HTTPException(status_code=403, detail="Session belongs to another user")
 
         content = await get_content(db, session_id) or ""
         segments = await get_segments(db, session_id)
@@ -250,11 +303,13 @@ async def list_sessions(
     q: Optional[str] = Query(None, description="Search query"),
     limit: int = Query(10, ge=1, le=100),
     offset: int = Query(0, ge=0),
+    user: dict = Depends(require_auth),
 ):
-    """List sessions with optional search."""
+    """List sessions for the current user with optional search. Requires authentication."""
     db = await get_db()
     try:
-        sessions, total = await get_sessions(db, query=q, limit=limit, offset=offset)
+        # 只返回当前用户的 sessions
+        sessions, total = await get_sessions_by_user(db, user["id"], limit=limit, offset=offset)
         page = (offset // limit) + 1 if limit > 0 else 1
         has_more = offset + len(sessions) < total
         return SessionListResponse(
@@ -281,11 +336,14 @@ async def list_sessions(
 
 
 @app.get("/api/sessions/grouped", response_model=GroupedSessionsResponse)
-async def list_sessions_grouped():
-    """List all sessions grouped by machine and path."""
+async def list_sessions_grouped(user: dict = Depends(require_auth)):
+    """List all sessions grouped by machine and path. Requires authentication."""
     db = await get_db()
     try:
+        # TODO: Filter by user_id when we have more data
         sessions = await get_sessions_grouped(db)
+        # Filter to only show user's sessions
+        user_sessions = [s for s in sessions if s.get("user_id") == user["id"] or not s.get("user_id")]
         return GroupedSessionsResponse(
             sessions=[
                 GroupedSessionItem(
@@ -298,7 +356,7 @@ async def list_sessions_grouped():
                     machine_name=s.get("machine_name"),
                     original_path=s.get("original_path"),
                 )
-                for s in sessions
+                for s in user_sessions
             ]
         )
     finally:
@@ -309,11 +367,14 @@ async def list_sessions_grouped():
 async def list_sessions_by_dir(
     machine: str = Query(..., description="Machine name"),
     path: str = Query(..., description="Original path"),
+    user: dict = Depends(require_auth),
 ):
-    """List sessions by machine name and original path (cloud directory)."""
+    """List sessions by machine name and original path. Requires authentication."""
     db = await get_db()
     try:
         sessions = await get_sessions_by_dir(db, machine, path)
+        # Filter to only show user's sessions
+        user_sessions = [s for s in sessions if s.get("user_id") == user["id"] or not s.get("user_id")]
         return SessionsByDirResponse(
             sessions=[
                 SessionListItem(
@@ -326,7 +387,7 @@ async def list_sessions_by_dir(
                     machines=s.get("machines"),
                     last_path=s.get("last_path"),
                 )
-                for s in sessions
+                for s in user_sessions
             ]
         )
     finally:
@@ -336,15 +397,19 @@ async def list_sessions_by_dir(
 @app.get(
     "/api/sessions/{session_id}",
     response_model=SessionDetailResponse,
-    responses={404: {"model": ErrorResponse}},
+    responses={404: {"model": ErrorResponse}, 401: {"model": ErrorResponse}},
 )
-async def get_session_detail(session_id: str):
-    """Get session details."""
+async def get_session_detail(session_id: str, user: dict = Depends(require_auth)):
+    """Get session details. Requires authentication."""
     db = await get_db()
     try:
         session = await get_session(db, session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="Session not found")
+
+        # 检查 session 是否属于当前用户
+        if session.get("user_id") and session["user_id"] != user["id"]:
+            raise HTTPException(status_code=403, detail="Session belongs to another user")
 
         segments = await get_segments(db, session_id)
 
@@ -378,12 +443,20 @@ async def get_session_detail(session_id: str):
 @app.delete(
     "/api/sessions/{session_id}",
     response_model=PushResponse,
-    responses={404: {"model": ErrorResponse}},
+    responses={404: {"model": ErrorResponse}, 401: {"model": ErrorResponse}},
 )
-async def delete_session_endpoint(session_id: str):
-    """Delete a session."""
+async def delete_session_endpoint(session_id: str, user: dict = Depends(require_auth)):
+    """Delete a session. Requires authentication."""
     db = await get_db()
     try:
+        session = await get_session(db, session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        # 检查 session 是否属于当前用户
+        if session.get("user_id") and session["user_id"] != user["id"]:
+            raise HTTPException(status_code=403, detail="Session belongs to another user")
+
         success = await delete_session(db, session_id)
         if not success:
             raise HTTPException(status_code=404, detail="Session not found")
@@ -395,11 +468,48 @@ async def delete_session_endpoint(session_id: str):
 @app.get("/api/search", response_model=SearchResponse)
 async def search_sessions(
     q: str = Query(..., min_length=1, description="Search query for content"),
+    user: dict = Depends(require_auth),
 ):
-    """Full-text search in session content. Returns all matching results."""
+    """Full-text search in session content. Requires authentication."""
     db = await get_db()
     try:
+        # Check if query looks like a session ID (UUID or agent-xxx format)
+        import re
+        is_session_id = bool(
+            re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', q, re.I) or
+            re.match(r'^agent-[0-9a-f]+$', q, re.I)
+        )
+
+        if is_session_id:
+            # Direct session lookup
+            session = await get_session(db, q)
+            if session and (session.get("user_id") == user["id"] or not session.get("user_id")):
+                segments = await get_segments(db, q)
+                machines = ",".join(set(s["machine_name"] for s in segments if s.get("machine_name")))
+                last_path = segments[-1]["original_path"] if segments else None
+                return SearchResponse(
+                    results=[
+                        SearchResultItem(
+                            session_id=session["session_id"],
+                            summary=session["summary"],
+                            first_message=session["first_message"],
+                            total_lines=session["total_lines"],
+                            created_at=session["created_at"],
+                            updated_at=session["updated_at"],
+                            machines=machines or None,
+                            last_path=last_path,
+                            snippet=None,
+                        )
+                    ],
+                    total=1,
+                )
+            else:
+                return SearchResponse(results=[], total=0)
+
+        # Full-text search
         results = await search_content(db, q)
+        # Filter to only show user's sessions
+        user_results = [r for r in results if r.get("user_id") == user["id"] or not r.get("user_id")]
         return SearchResponse(
             results=[
                 SearchResultItem(
@@ -413,9 +523,9 @@ async def search_sessions(
                     last_path=r.get("last_path"),
                     snippet=r.get("snippet"),
                 )
-                for r in results
+                for r in user_results
             ],
-            total=len(results),
+            total=len(user_results),
         )
     finally:
         await db.close()
@@ -588,3 +698,53 @@ async def github_auth_callback(
         return RedirectResponse(
             url=f"{FRONTEND_URL}/auth/callback?error={str(e)}"
         )
+
+
+# ============ Pinned Folders Endpoints ============
+
+@app.get("/api/pinned-folders", response_model=PinnedFoldersResponse)
+async def list_pinned_folders(user: dict = Depends(require_auth)):
+    """Get pinned folders for the current user."""
+    db = await get_db()
+    try:
+        folders = await get_pinned_folders(db, user["id"])
+        return PinnedFoldersResponse(
+            folders=[
+                PinnedFolder(
+                    id=f["id"],
+                    user_id=f["user_id"],
+                    machine_name=f["machine_name"],
+                    original_path=f["original_path"],
+                    pinned_at=f["pinned_at"],
+                )
+                for f in folders
+            ]
+        )
+    finally:
+        await db.close()
+
+
+@app.post("/api/pinned-folders", response_model=PushResponse)
+async def pin_folder(request: PinFolderRequest, user: dict = Depends(require_auth)):
+    """Pin a folder for the current user."""
+    db = await get_db()
+    try:
+        await add_pinned_folder(db, user["id"], request.machine_name, request.original_path)
+        return PushResponse(ok=True)
+    finally:
+        await db.close()
+
+
+@app.delete("/api/pinned-folders", response_model=PushResponse)
+async def unpin_folder(
+    machine_name: str = Query(...),
+    original_path: str = Query(...),
+    user: dict = Depends(require_auth),
+):
+    """Unpin a folder for the current user."""
+    db = await get_db()
+    try:
+        success = await remove_pinned_folder(db, user["id"], machine_name, original_path)
+        return PushResponse(ok=success)
+    finally:
+        await db.close()

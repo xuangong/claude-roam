@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { saveAuthToken } from '../api'
+import { saveAuthToken, getCurrentUser } from '../api'
+import { useAuth } from '../App'
 
 function AuthCallback() {
   const [searchParams] = useSearchParams()
   const navigate = useNavigate()
   const [error, setError] = useState<string | null>(null)
+  const { setUser } = useAuth()
 
   useEffect(() => {
     const token = searchParams.get('token')
@@ -18,12 +20,19 @@ function AuthCallback() {
 
     if (token) {
       saveAuthToken(token)
-      // Redirect to home
-      navigate('/', { replace: true })
+      // Fetch user info and update state
+      getCurrentUser().then(user => {
+        if (user) {
+          setUser(user)
+          navigate('/', { replace: true })
+        } else {
+          setError('Failed to get user info')
+        }
+      })
     } else {
       setError('No token received')
     }
-  }, [searchParams, navigate])
+  }, [searchParams, navigate, setUser])
 
   if (error) {
     return (

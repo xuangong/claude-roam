@@ -2,6 +2,19 @@
  * API client for Claude Roam server
  */
 
+import { getAuth } from "./state.js";
+
+/**
+ * Get auth headers if user is logged in
+ */
+function getAuthHeaders(): Record<string, string> {
+  const auth = getAuth();
+  if (auth?.token) {
+    return { Authorization: `Bearer ${auth.token}` };
+  }
+  return {};
+}
+
 export interface SourceInfo {
   machine_id: string;
   machine_name: string | null;
@@ -99,7 +112,10 @@ export async function pushSession(
   await withRetry(async () => {
     const response = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...getAuthHeaders(),
+      },
       body: JSON.stringify(request),
     });
 
@@ -120,7 +136,9 @@ export async function pullSession(
   }
 
   return await withRetry(async () => {
-    const response = await fetch(url);
+    const response = await fetch(url, {
+      headers: getAuthHeaders(),
+    });
     if (!response.ok) {
       if (response.status === 404) {
         throw new Error(`Session not found: ${sessionId}`);
@@ -145,7 +163,9 @@ export async function listSessions(
   const url = `${getApiUrl()}/api/sessions?${params.toString()}`;
 
   return await withRetry(async () => {
-    const response = await fetch(url);
+    const response = await fetch(url, {
+      headers: getAuthHeaders(),
+    });
     if (!response.ok) {
       const text = await response.text();
       throw new Error(`List failed: ${response.status} ${text}`);
@@ -160,7 +180,9 @@ export async function getSessionDetail(
   const url = `${getApiUrl()}/api/sessions/${sessionId}`;
 
   return await withRetry(async () => {
-    const response = await fetch(url);
+    const response = await fetch(url, {
+      headers: getAuthHeaders(),
+    });
     if (!response.ok) {
       if (response.status === 404) {
         throw new Error(`Session not found: ${sessionId}`);
@@ -176,7 +198,10 @@ export async function deleteSession(sessionId: string): Promise<void> {
   const url = `${getApiUrl()}/api/sessions/${sessionId}`;
 
   await withRetry(async () => {
-    const response = await fetch(url, { method: "DELETE" });
+    const response = await fetch(url, {
+      method: "DELETE",
+      headers: getAuthHeaders(),
+    });
     if (!response.ok) {
       if (response.status === 404) {
         throw new Error(`Session not found: ${sessionId}`);
@@ -211,7 +236,9 @@ export async function listSessionsByDir(
   const url = `${getApiUrl()}/api/sessions/by-dir?${params.toString()}`;
 
   return await withRetry(async () => {
-    const response = await fetch(url);
+    const response = await fetch(url, {
+      headers: getAuthHeaders(),
+    });
     if (!response.ok) {
       const text = await response.text();
       throw new Error(`List by dir failed: ${response.status} ${text}`);
@@ -243,7 +270,9 @@ export async function listSessionsGrouped(): Promise<GroupedSessionItem[]> {
   const url = `${getApiUrl()}/api/sessions/grouped`;
 
   return await withRetry(async () => {
-    const response = await fetch(url);
+    const response = await fetch(url, {
+      headers: getAuthHeaders(),
+    });
     if (!response.ok) {
       const text = await response.text();
       throw new Error(`List grouped failed: ${response.status} ${text}`);
@@ -321,6 +350,29 @@ export async function pollDeviceToken(deviceCode: string): Promise<DeviceTokenRe
   }
 
   return (await response.json()) as DeviceTokenResponse;
+}
+
+/**
+ * Get all remote session IDs (for checking existence)
+ */
+export async function getRemoteSessionIds(): Promise<Set<string>> {
+  // Fetch all sessions (paginated) and collect IDs
+  const ids = new Set<string>();
+  let offset = 0;
+  const limit = 100;
+
+  while (true) {
+    const response = await listSessions(undefined, limit, offset);
+    for (const session of response.sessions) {
+      ids.add(session.session_id);
+    }
+    if (!response.has_more || response.sessions.length < limit) {
+      break;
+    }
+    offset += limit;
+  }
+
+  return ids;
 }
 
 /**

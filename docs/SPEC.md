@@ -365,6 +365,12 @@ claude-roam map <subcommand>    # 目录映射管理
 claude-roam clean [session-id]  # 删除本地会话
 claude-roam daemon [options]    # 后台同步
 claude-roam status              # 查看状态
+claude-roam export [options]    # 导出会话到 .roam 文件
+claude-roam import <file>       # 导入 .roam 文件
+claude-roam preview [file]      # 在浏览器中预览会话
+claude-roam login               # GitHub OAuth 登录
+claude-roam logout              # 登出
+claude-roam whoami              # 显示当前用户
 ```
 
 ### 4.2 命令详情
@@ -430,6 +436,32 @@ claude-roam daemon --detach   # 后台运行（未实现）
 claude-roam status            # 显示机器信息、同步状态
 ```
 
+#### export
+```bash
+claude-roam export                    # 导出当前目录的所有 session
+claude-roam export -o <file.roam>     # 指定输出文件名
+claude-roam export -s <session-id>    # 导出指定 session
+```
+
+#### import
+```bash
+claude-roam import <file.roam>        # 导入到当前目录
+claude-roam import <file.roam> -y     # 跳过确认
+```
+
+#### preview
+```bash
+claude-roam preview                   # 预览当前目录的所有 session
+claude-roam preview <file.roam>       # 预览指定 .roam 文件
+```
+
+#### login / logout / whoami
+```bash
+claude-roam login             # GitHub OAuth 登录 (Device Flow)
+claude-roam logout            # 登出
+claude-roam whoami            # 显示当前登录用户
+```
+
 ### 4.3 配置
 
 **环境变量:**
@@ -443,6 +475,18 @@ ROAM_MACHINE_NAME=my-macbook      # 可选，机器名称
 {
   machine_id: string           // 自动生成的 UUID
   machine_name: string         // 机器名称
+
+  // GitHub OAuth 认证
+  auth?: {
+    access_token: string       // GitHub access token
+    user: {
+      id: number
+      login: string            // GitHub 用户名
+      name: string
+      avatar_url: string
+    }
+    authenticated_at: string
+  }
 
   // 目录映射：本地目录 -> 云端目录标识
   dirMappings: {
@@ -740,15 +784,129 @@ async function parallelLimit<T, R>(
 
 ---
 
-## 9. 后续优化
+## 9. .roam 文件格式
 
-### 9.1 计划中
-- [ ] 认证机制（API Key / OAuth）
+### 9.1 格式版本
+
+**Version 2** (当前):
+```json
+{
+  "version": 2,
+  "exportedAt": "2026-01-25T10:00:00.000Z",
+  "source": {
+    "machineId": "12f84e10-cb13-4a4b-b63f-xxxx",
+    "machineName": "alice-mac",
+    "originalPath": "/Users/alice/projects/foo"
+  },
+  "sessions": [
+    {
+      "id": "ba2699dc-37bc-4974-a422-xxxx",
+      "lineCount": 100,
+      "modifiedAt": "2026-01-25T09:00:00.000Z",
+      "data": "{\"type\":\"...\"}\n{\"type\":\"...\"}\n..."
+    }
+  ]
+}
+```
+
+**Version 1** (已弃用，仍支持导入):
+```json
+{
+  "version": 1,
+  "exportedAt": "...",
+  "source": { ... },
+  "session": { "id": "...", "lineCount": 100, "modifiedAt": "..." },
+  "data": "..."
+}
+```
+
+---
+
+## 10. CLI 构建流程
+
+### 10.1 构建架构
+
+```
+web/src/PreviewApp.tsx  ─┐
+web/src/preview-main.tsx ├──► web/build-preview.mjs ──► cli/assets/preview.html
+web/preview.html        ─┘     (vite-plugin-singlefile)
+                                          │
+                                          ▼
+cli/src/index.ts ───────────────────► bun build --compile ──► cli/dist/claude-roam-*
+  (import preview.html as text)                               (单文件可执行程序)
+```
+
+### 10.2 数据注入机制
+
+**问题**: 需要将 JSON 数据安全地嵌入 HTML 中，避免 `</script>` 等特殊字符破坏解析。
+
+**解决方案**: Base64 编码
+1. CLI 将 JSON 数据用 `Buffer.from(json, 'utf-8').toString('base64')` 编码
+2. 替换 HTML 中的占位符 `__INJECT_ROAM_DATA_BASE64__`
+3. 前端用 `atob()` + `TextDecoder('utf-8')` 解码（支持中文）
+
+**占位符检测**:
+- 占位符以下划线 `_` 开头
+- Base64 数据以字母/数字开头
+- 前端通过 `startsWith('_')` 判断是否已注入数据
+
+### 10.3 构建命令
+
+```bash
+# 在 cli 目录下执行
+
+# 构建当前平台可执行文件
+npm run build:bin
+
+# 构建所有平台可执行文件
+npm run build:all
+
+# 单独构建各平台
+npm run build:macos-arm64    # macOS Apple Silicon
+npm run build:macos-x64      # macOS Intel
+npm run build:linux-x64      # Linux x86_64
+npm run build:linux-arm64    # Linux ARM64
+npm run build:windows-x64    # Windows x64
+```
+
+### 10.4 交叉编译
+
+Bun 支持在任意平台交叉编译到其他平台：
+
+| Target | 命令 |
+|--------|------|
+| macOS ARM64 | `bun build --compile --target=bun-darwin-arm64` |
+| macOS x64 | `bun build --compile --target=bun-darwin-x64` |
+| Linux x64 | `bun build --compile --target=bun-linux-x64` |
+| Linux ARM64 | `bun build --compile --target=bun-linux-arm64` |
+| Windows x64 | `bun build --compile --target=bun-windows-x64` |
+
+### 10.5 输出文件
+
+```
+cli/dist/
+├── claude-roam-darwin-arm64     # macOS ARM64 (~58MB)
+├── claude-roam-darwin-x64       # macOS x64 (~64MB)
+├── claude-roam-linux-arm64      # Linux ARM64 (~93MB)
+├── claude-roam-linux-x64        # Linux x64 (~100MB)
+└── claude-roam-windows-x64.exe  # Windows x64 (~114MB)
+```
+
+---
+
+## 11. 后续优化
+
+### 11.1 已完成
+- [x] 认证机制（GitHub OAuth）
+- [x] 导出/导入功能
+- [x] 本地预览功能
+- [x] 跨平台构建
+
+### 11.2 计划中
 - [ ] 会话压缩存储
 - [ ] 移动端 Web 适配
 
-### 9.2 考虑中
+### 11.3 考虑中
 - [ ] 会话分享（公开链接）
 - [ ] 会话标签/分组
 - [ ] 自动摘要生成
-- [ ] 多用户支持

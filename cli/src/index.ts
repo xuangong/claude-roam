@@ -5,6 +5,7 @@
 
 import { Command } from "commander";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import {
   pullSession as pullSessionApi,
@@ -16,6 +17,7 @@ import {
   requestDeviceCode,
   pollDeviceToken,
   getCurrentUser,
+  getRemoteSessionIds,
 } from "./api.js";
 import { startDaemon } from "./daemon.js";
 import {
@@ -45,6 +47,10 @@ import {
   isLoggedIn,
   AuthState,
 } from "./state.js";
+
+// Import preview.html as text for bundling
+// @ts-ignore - bun specific import
+import previewHtmlTemplate from "../assets/preview.html" with { type: "text" };
 
 const program = new Command();
 
@@ -96,7 +102,7 @@ program
   .description("Push session(s) to server")
   .option("-s, --session <id>", "Push specific session")
   .option("--all", "Push all local sessions (default: only current directory)")
-  .option("--force", "Force push even if no changes (only for current directory, not with --all)")
+  .option("--force", "Force push all content, ignoring remote state")
   .option("-c, --concurrency <n>", "Max concurrent uploads", "20")
   .action(async (options) => {
     const state = loadState();
@@ -107,9 +113,9 @@ program
       process.exit(1);
     }
 
-    // --force 和 --all 不能同时使用
-    if (options.force && options.all) {
-      console.error("Error: --force cannot be used with --all");
+    // Check login status
+    if (!isLoggedIn()) {
+      console.error("Error: Not logged in. Please run 'claude-roam login' first.");
       process.exit(1);
     }
 
@@ -145,6 +151,14 @@ program
       }
     }
 
+    // For --all mode without --force, check which sessions exist remotely to avoid re-uploading deleted ones
+    let remoteSessionIds: Set<string> | null = null;
+    if (options.all && !options.force) {
+      console.log("Checking remote sessions...");
+      remoteSessionIds = await getRemoteSessionIds();
+      console.log(`Found ${remoteSessionIds.size} session(s) on server`);
+    }
+
     // Prepare sessions to push
     interface PushTask {
       session: LocalSession;
@@ -154,7 +168,18 @@ program
     }
 
     const tasks: PushTask[] = [];
+    let skippedDeleted = 0;
     for (const session of sessions) {
+      // In --all mode without --force, skip sessions that don't exist on server (deleted remotely)
+      if (remoteSessionIds !== null && !remoteSessionIds.has(session.sessionId)) {
+        // Check if this session was ever pushed (exists in local state)
+        if (state.sessions[session.sessionId]) {
+          skippedDeleted++;
+          continue;
+        }
+        // New session that was never pushed - allow it
+      }
+
       const lastLine = state.sessions[session.sessionId]?.lastLine || 0;
 
       // 如果没有变化且不是 force 模式，跳过
@@ -185,6 +210,10 @@ program
       }
 
       tasks.push({ session, fromLine, appendData, originalPath });
+    }
+
+    if (skippedDeleted > 0) {
+      console.log(`Skipped ${skippedDeleted} session(s) deleted on server (use --force to re-upload)`);
     }
 
     if (tasks.length === 0) {
@@ -238,6 +267,12 @@ program
   .action(async (options) => {
     if (!process.env.ROAM_API) {
       console.error("Error: ROAM_API environment variable not set");
+      process.exit(1);
+    }
+
+    // Check login status
+    if (!isLoggedIn()) {
+      console.error("Error: Not logged in. Please run 'claude-roam login' first.");
       process.exit(1);
     }
 
@@ -515,6 +550,12 @@ program
         process.exit(1);
       }
 
+      // Check login status
+      if (!isLoggedIn()) {
+        console.error("Error: Not logged in. Please run 'claude-roam login' first.");
+        process.exit(1);
+      }
+
       const sessions = await listSessionsGrouped();
 
       if (options.json) {
@@ -573,6 +614,12 @@ program
         process.exit(1);
       }
 
+      // Check login status
+      if (!isLoggedIn()) {
+        console.error("Error: Not logged in. Please run 'claude-roam login' first.");
+        process.exit(1);
+      }
+
       const response = await listSessions(options.query, limit, offset);
       const sessions = response.sessions;
 
@@ -621,6 +668,12 @@ program
   .action(async (options) => {
     if (!process.env.ROAM_API) {
       console.error("Error: ROAM_API environment variable not set");
+      process.exit(1);
+    }
+
+    // Check login status
+    if (!isLoggedIn()) {
+      console.error("Error: Not logged in. Please run 'claude-roam login' first.");
       process.exit(1);
     }
 
@@ -1021,6 +1074,290 @@ program
         console.log("\n⚠️  Token may be expired. Use 'claude-roam login' to re-authenticate.");
       }
     }
+  });
+
+// Export command - export current directory's all sessions to a .roam file
+program
+  .command("export")
+  .description("Export current directory's all sessions to a .roam file")
+  .option("-o, --output <file>", "Output file path")
+  .action(async (options) => {
+    const currentDir = process.cwd();
+    const encodedDir = encodePathForClaude(currentDir);
+    const sessions = scanLocalSessions();
+
+    // Find sessions for current directory
+    const dirSessions = sessions.filter((s) => s.encodedDir === encodedDir);
+
+    if (dirSessions.length === 0) {
+      console.error("No sessions found for current directory.");
+      console.log(`\nCurrent directory: ${currentDir}`);
+      console.log("Make sure you have Claude Code sessions in this directory.");
+      process.exit(1);
+    }
+
+    const state = loadState();
+
+    // Read all session contents
+    const sessionsData = dirSessions.map((session) => ({
+      id: session.sessionId,
+      lineCount: session.lineCount,
+      modifiedAt: session.modifiedAt.toISOString(),
+      data: readSessionContent(session.filePath),
+    }));
+
+    // Create export bundle with all sessions
+    const bundle = {
+      version: 2,  // New version for multi-session format
+      exportedAt: new Date().toISOString(),
+      source: {
+        machineId: state.machine_id,
+        machineName: state.machine_name,
+        originalPath: currentDir,
+      },
+      sessions: sessionsData,
+    };
+
+    // Determine output file - include machine name, directory and timestamp
+    const dirName = path.basename(currentDir);
+    const machineShort = state.machine_name.replace(/[^a-zA-Z0-9-]/g, '').slice(0, 20);
+    const now = new Date();
+    const timestamp = `${now.toISOString().slice(0, 10).replace(/-/g, '')}_${now.toTimeString().slice(0, 8).replace(/:/g, '')}`;  // YYYYMMDD_HHMMSS
+    const defaultFileName = `${machineShort}_${dirName}_${timestamp}.roam`;
+    const outputFile = options.output || defaultFileName;
+    const outputPath = path.isAbsolute(outputFile) ? outputFile : path.join(currentDir, outputFile);
+
+    // Write bundle as JSON
+    fs.writeFileSync(outputPath, JSON.stringify(bundle, null, 2));
+
+    console.log(`✓ Exported ${sessionsData.length} session(s) to: ${outputPath}`);
+    console.log(`  Source: ${state.machine_name}:${currentDir}`);
+    sessionsData.forEach((s) => {
+      console.log(`  - ${s.id} (${s.lineCount} lines)`);
+    });
+    console.log(`\nTo import on another machine:`);
+    console.log(`  cd /path/to/target/directory`);
+    console.log(`  claude-roam import ${path.basename(outputPath)}`);
+  });
+
+// Import command - import a .roam file and establish mapping
+program
+  .command("import <file>")
+  .description("Import a .roam file and establish directory mapping")
+  .option("--no-mapping", "Don't create directory mapping")
+  .action(async (file, options) => {
+    const currentDir = process.cwd();
+
+    // Read the bundle file
+    const filePath = path.isAbsolute(file) ? file : path.join(currentDir, file);
+
+    if (!fs.existsSync(filePath)) {
+      console.error(`File not found: ${filePath}`);
+      process.exit(1);
+    }
+
+    let bundle;
+    try {
+      const content = fs.readFileSync(filePath, "utf-8");
+      bundle = JSON.parse(content);
+    } catch (err) {
+      console.error("Failed to parse .roam file:", err);
+      process.exit(1);
+    }
+
+    // Validate bundle - support both v1 (single session) and v2 (multi session)
+    if (!bundle.version || !bundle.source) {
+      console.error("Invalid .roam file format");
+      process.exit(1);
+    }
+
+    console.log(`Importing from: ${bundle.source.machineName}:${bundle.source.originalPath}`);
+
+    // Determine target directory in ~/.claude/projects/
+    const targetDir = getSessionTargetDir(currentDir);
+
+    // Ensure target directory exists
+    if (!fs.existsSync(targetDir)) {
+      fs.mkdirSync(targetDir, { recursive: true });
+    }
+
+    // Handle both v1 (single session) and v2 (multi session) formats
+    let sessionsToImport: Array<{ id: string; lineCount: number; data: string }> = [];
+
+    if (bundle.version === 1 && bundle.session && bundle.data) {
+      // v1 format: single session
+      sessionsToImport = [{
+        id: bundle.session.id,
+        lineCount: bundle.session.lineCount,
+        data: bundle.data,
+      }];
+    } else if (bundle.version === 2 && bundle.sessions) {
+      // v2 format: multiple sessions
+      sessionsToImport = bundle.sessions;
+    } else {
+      console.error("Invalid .roam file format: unknown version or missing data");
+      process.exit(1);
+    }
+
+    console.log(`  ${sessionsToImport.length} session(s) to import`);
+
+    // Write session files
+    let imported = 0;
+    let skipped = 0;
+    for (const session of sessionsToImport) {
+      const targetFile = path.join(targetDir, `${session.id}.jsonl`);
+
+      if (fs.existsSync(targetFile)) {
+        console.log(`  ⚠️  Skipping ${session.id} (already exists)`);
+        skipped++;
+      } else {
+        fs.writeFileSync(targetFile, session.data);
+        console.log(`  ✓ ${session.id} (${session.lineCount} lines)`);
+        imported++;
+      }
+    }
+
+    // Create directory mapping if requested
+    if (options.mapping !== false) {
+      const remoteDir = `${bundle.source.machineName}:${bundle.source.originalPath}`;
+      const existingMapping = getDirMapping(currentDir);
+
+      if (existingMapping) {
+        if (existingMapping === remoteDir) {
+          console.log(`✓ Directory mapping already exists: ${remoteDir}`);
+        } else {
+          console.log(`\n⚠️  Directory already mapped to: ${existingMapping}`);
+          console.log(`Cannot add new mapping to: ${remoteDir}`);
+          console.log("Remove existing mapping first with 'claude-roam map remove'");
+        }
+      } else {
+        addDirMapping(currentDir, remoteDir);
+        console.log(`✓ Directory mapping created: ${currentDir} -> ${remoteDir}`);
+      }
+    }
+
+    console.log(`\n✓ Import complete! (${imported} imported, ${skipped} skipped)`);
+    console.log(`You can now use 'claude-roam push' and 'claude-roam pull' to sync.`);
+  });
+
+// Preview command - open .roam file in browser
+program
+  .command("preview [file]")
+  .description("Preview a .roam file in browser (defaults to export + preview)")
+  .action(async (file) => {
+    let roamFilePath: string;
+    let tempFile = false;
+
+    if (file) {
+      // User specified a file
+      roamFilePath = path.isAbsolute(file) ? file : path.join(process.cwd(), file);
+      if (!fs.existsSync(roamFilePath)) {
+        console.error(`File not found: ${roamFilePath}`);
+        process.exit(1);
+      }
+    } else {
+      // No file specified - export current directory first
+      const currentDir = process.cwd();
+      const encodedDir = encodePathForClaude(currentDir);
+      const sessions = scanLocalSessions();
+      const dirSessions = sessions.filter((s) => s.encodedDir === encodedDir);
+
+      if (dirSessions.length === 0) {
+        console.error("No sessions found for current directory.");
+        console.log(`\nCurrent directory: ${currentDir}`);
+        console.log("Make sure you have Claude Code sessions in this directory.");
+        process.exit(1);
+      }
+
+      const state = loadState();
+      const sessionsData = dirSessions.map((session) => ({
+        id: session.sessionId,
+        lineCount: session.lineCount,
+        modifiedAt: session.modifiedAt.toISOString(),
+        data: readSessionContent(session.filePath),
+      }));
+
+      const bundle = {
+        version: 2,
+        exportedAt: new Date().toISOString(),
+        source: {
+          machineId: state.machine_id,
+          machineName: state.machine_name,
+          originalPath: currentDir,
+        },
+        sessions: sessionsData,
+      };
+
+      // Write to temp file (cross-platform)
+      const tmpDir = path.join(os.tmpdir(), "claude-roam");
+      if (!fs.existsSync(tmpDir)) {
+        fs.mkdirSync(tmpDir, { recursive: true });
+      }
+      roamFilePath = path.join(tmpDir, `preview-${Date.now()}.roam`);
+      fs.writeFileSync(roamFilePath, JSON.stringify(bundle));
+      tempFile = true;
+
+      console.log(`Found ${sessionsData.length} session(s) for current directory`);
+    }
+
+    // Read .roam file
+    let bundle;
+    try {
+      const content = fs.readFileSync(roamFilePath, "utf-8");
+      bundle = JSON.parse(content);
+    } catch (err) {
+      console.error("Failed to parse .roam file:", err);
+      process.exit(1);
+    }
+
+    // Use embedded preview.html template
+    let previewHtml = previewHtmlTemplate;
+    if (!previewHtml || previewHtml === "") {
+      console.error("Preview template not found in bundle.");
+      process.exit(1);
+    }
+
+    // Inject data using base64 encoding to avoid any HTML/JSON escaping issues
+    // The frontend will decode this
+    // Use replaceAll since the placeholder appears in both JS code and the data tag
+    const jsonData = JSON.stringify(bundle);
+    const base64Data = Buffer.from(jsonData, 'utf-8').toString('base64');
+    previewHtml = previewHtml.replaceAll('__INJECT_ROAM_DATA_BASE64__', base64Data);
+
+    // Write to temp file (cross-platform)
+    const tmpDir = path.join(os.tmpdir(), "claude-roam");
+    if (!fs.existsSync(tmpDir)) {
+      fs.mkdirSync(tmpDir, { recursive: true });
+    }
+    const outputHtml = path.join(tmpDir, `preview-${Date.now()}.html`);
+    fs.writeFileSync(outputHtml, previewHtml);
+
+    // Open in browser
+    const { exec } = await import("child_process");
+    const platform = process.platform;
+    let cmd: string;
+
+    if (platform === "darwin") {
+      cmd = `open "${outputHtml}"`;
+    } else if (platform === "win32") {
+      cmd = `start "" "${outputHtml}"`;
+    } else {
+      cmd = `xdg-open "${outputHtml}"`;
+    }
+
+    exec(cmd, (err) => {
+      if (err) {
+        console.error("Failed to open browser:", err.message);
+        console.log(`\nYou can manually open: ${outputHtml}`);
+      } else {
+        console.log("✓ Opened preview in browser");
+        if (tempFile) {
+          console.log(`  Source: ${bundle.source.machineName}:${bundle.source.originalPath}`);
+        } else {
+          console.log(`  File: ${roamFilePath}`);
+        }
+      }
+    });
   });
 
 program.parse();

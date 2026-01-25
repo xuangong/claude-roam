@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Link } from 'react-router-dom'
-import { getGroupedSessions, searchContent, type GroupedSessionItem, type SearchResultItem } from '../api'
+import { getGroupedSessions, searchContent, deleteSession, getPinnedFolders, pinFolder, unpinFolder, type GroupedSessionItem, type SearchResultItem, type PinnedFolder } from '../api'
 
 function formatTimeAgo(dateStr: string): string {
   const date = new Date(dateStr)
@@ -45,14 +45,31 @@ function SessionList() {
   const [expandedMachines, setExpandedMachines] = useState<Set<string>>(new Set())
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set())
   const [copiedKey, setCopiedKey] = useState<string | null>(null)
+  const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [isDeleting, setIsDeleting] = useState(false)
+  const [pinnedFolders, setPinnedFolders] = useState<PinnedFolder[]>([])
+  const [minLines, setMinLines] = useState<number>(() => {
+    const saved = localStorage.getItem('minLines')
+    return saved ? parseInt(saved) : 0
+  })
+
+  // Save minLines to localStorage
+  useEffect(() => {
+    localStorage.setItem('minLines', String(minLines))
+  }, [minLines])
 
   const fetchSessions = useCallback(async () => {
     try {
       setLoading(true)
       setError(null)
-      const response = await getGroupedSessions()
-      setSessions(response.sessions)
-      const machines = new Set(response.sessions.map(s => s.machine_name || 'unknown'))
+      const [sessionsResponse, pinnedResponse] = await Promise.all([
+        getGroupedSessions(),
+        getPinnedFolders()
+      ])
+      setSessions(sessionsResponse.sessions)
+      setPinnedFolders(pinnedResponse.folders)
+      const machines = new Set(sessionsResponse.sessions.map(s => s.machine_name || 'unknown'))
       setExpandedMachines(machines)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load sessions')
@@ -113,9 +130,12 @@ function SessionList() {
     })
   }
 
+  // Filter sessions by minLines
+  const filteredSessions = sessions.filter(s => s.total_lines >= minLines)
+
   // Group by machine and directory
   const groupedData: GroupedData = {}
-  for (const session of sessions) {
+  for (const session of filteredSessions) {
     const machine = session.machine_name || 'unknown'
     const folder = getFolder(session.original_path)
     if (!groupedData[machine]) {
@@ -130,6 +150,47 @@ function SessionList() {
     groupedData[machine][folder].sessions.push(session)
   }
 
+  // Check if a folder is pinned
+  const isPinned = (machine: string, fullPath: string | null): boolean => {
+    if (!fullPath) return false
+    return pinnedFolders.some(p => p.machine_name === machine && p.original_path === fullPath)
+  }
+
+  // Toggle pin status
+  const togglePin = async (machine: string, fullPath: string | null, e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (!fullPath) return
+
+    try {
+      if (isPinned(machine, fullPath)) {
+        await unpinFolder(machine, fullPath)
+        setPinnedFolders(prev => prev.filter(p => !(p.machine_name === machine && p.original_path === fullPath)))
+      } else {
+        await pinFolder(machine, fullPath)
+        setPinnedFolders(prev => [...prev, {
+          id: Date.now(),
+          user_id: '',
+          machine_name: machine,
+          original_path: fullPath,
+          pinned_at: new Date().toISOString()
+        }])
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to toggle pin')
+    }
+  }
+
+  // Sort folders: pinned first, then by name
+  const sortFolders = (folders: [string, { sessions: GroupedSessionItem[]; fullPath: string | null }][], machine: string) => {
+    return folders.sort((a, b) => {
+      const aPinned = isPinned(machine, a[1].fullPath)
+      const bPinned = isPinned(machine, b[1].fullPath)
+      if (aPinned && !bPinned) return -1
+      if (!aPinned && bPinned) return 1
+      return a[0].localeCompare(b[0])
+    })
+  }
+
   const copyMapCommand = async (machine: string, fullPath: string | null, folderKey: string) => {
     if (!fullPath) return
     const command = `claude-roam map add "${machine}:${fullPath}"`
@@ -142,29 +203,158 @@ function SessionList() {
     }
   }
 
+  const handleDelete = async (sessionId: string, e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+
+    if (!confirm(`Delete session ${sessionId.slice(0, 8)}...?`)) {
+      return
+    }
+
+    try {
+      setDeletingId(sessionId)
+      await deleteSession(sessionId)
+      // Remove from local state
+      setSessions(prev => prev.filter(s => s.session_id !== sessionId))
+      if (searchResults) {
+        setSearchResults(prev => prev ? prev.filter(s => s.session_id !== sessionId) : null)
+      }
+      // Remove from selection
+      setSelectedIds(prev => {
+        const next = new Set(prev)
+        next.delete(sessionId)
+        return next
+      })
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete session')
+    } finally {
+      setDeletingId(null)
+    }
+  }
+
+  const toggleSelect = (sessionId: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      if (next.has(sessionId)) {
+        next.delete(sessionId)
+      } else {
+        next.add(sessionId)
+      }
+      return next
+    })
+  }
+
+  const selectAllInFolder = (folderSessions: GroupedSessionItem[]) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      const allSelected = folderSessions.every(s => prev.has(s.session_id))
+      if (allSelected) {
+        // Deselect all
+        folderSessions.forEach(s => next.delete(s.session_id))
+      } else {
+        // Select all
+        folderSessions.forEach(s => next.add(s.session_id))
+      }
+      return next
+    })
+  }
+
+  const clearSelection = () => {
+    setSelectedIds(new Set())
+  }
+
+  const handleBatchDelete = async () => {
+    if (selectedIds.size === 0) return
+
+    if (!confirm(`Delete ${selectedIds.size} selected session(s)?`)) {
+      return
+    }
+
+    setIsDeleting(true)
+    setError(null)
+
+    const idsToDelete = Array.from(selectedIds)
+    let deleted = 0
+    let failed = 0
+
+    for (const id of idsToDelete) {
+      try {
+        await deleteSession(id)
+        deleted++
+      } catch {
+        failed++
+      }
+    }
+
+    // Update local state
+    setSessions(prev => prev.filter(s => !selectedIds.has(s.session_id)))
+    if (searchResults) {
+      setSearchResults(prev => prev ? prev.filter(s => !selectedIds.has(s.session_id)) : null)
+    }
+    setSelectedIds(new Set())
+    setIsDeleting(false)
+
+    if (failed > 0) {
+      setError(`Deleted ${deleted}, failed ${failed}`)
+    }
+  }
+
   return (
     <div className="session-list-page">
       <header className="header">
         <h1>Claude Roam</h1>
-        <form className="search-box" onSubmit={handleSearch}>
-          <input
-            type="text"
-            placeholder="$ grep -r 'search query'..."
-            value={searchInput}
-            onChange={e => setSearchInput(e.target.value)}
-          />
-          <button type="submit" disabled={isSearching} className="primary">
-            {isSearching ? 'Searching' : 'Search'}
-          </button>
-          {searchResults !== null && (
-            <button type="button" onClick={clearSearch} className="clear-btn">
-              ✕
+        <div className="header-controls">
+          <Link to="/preview" style={{ marginRight: 'var(--space-4)' }}>
+            <button>Load .roam</button>
+          </Link>
+          <div className="filter-box">
+            <label htmlFor="minLines">Min lines:</label>
+            <input
+              id="minLines"
+              type="number"
+              min="0"
+              value={minLines || ''}
+              onChange={e => setMinLines(parseInt(e.target.value) || 0)}
+              placeholder="0"
+            />
+          </div>
+          <form className="search-box" onSubmit={handleSearch}>
+            <input
+              type="text"
+              placeholder="$ grep -r 'search query'..."
+              value={searchInput}
+              onChange={e => setSearchInput(e.target.value)}
+            />
+            <button type="submit" disabled={isSearching} className="primary">
+              {isSearching ? 'Searching' : 'Search'}
             </button>
-          )}
-        </form>
+            {searchResults !== null && (
+              <button type="button" onClick={clearSearch} className="clear-btn">
+                ✕
+              </button>
+            )}
+          </form>
+        </div>
       </header>
 
       {error && <div className="error">ERROR: {error}</div>}
+
+      {/* Batch Action Bar */}
+      {selectedIds.size > 0 && (
+        <div className="batch-action-bar">
+          <span className="selection-count">{selectedIds.size} selected</span>
+          <button className="batch-btn cancel" onClick={clearSelection}>
+            Cancel
+          </button>
+          <button
+            className="batch-btn delete"
+            onClick={handleBatchDelete}
+            disabled={isDeleting}
+          >
+            {isDeleting ? 'Deleting...' : 'Delete Selected'}
+          </button>
+        </div>
+      )}
 
       {/* Search Results */}
       {searchResults !== null && (
@@ -177,7 +367,14 @@ function SessionList() {
           ) : (
             <div className="session-list" style={{ paddingLeft: 0 }}>
               {searchResults.map(result => (
-                <div key={result.session_id} className="session-card search-result">
+                <div key={result.session_id} className={`session-card search-result ${selectedIds.has(result.session_id) ? 'selected' : ''}`}>
+                  <input
+                    type="checkbox"
+                    className="session-checkbox"
+                    checked={selectedIds.has(result.session_id)}
+                    onChange={() => toggleSelect(result.session_id)}
+                    onClick={(e) => e.stopPropagation()}
+                  />
                   <Link to={`/sessions/${result.session_id}`}>
                     <div className="session-id">{result.session_id.slice(0, 8)}</div>
                     {result.snippet && (
@@ -192,6 +389,14 @@ function SessionList() {
                       <span>{formatTimeAgo(result.updated_at)}</span>
                     </div>
                   </Link>
+                  <button
+                    className="delete-btn"
+                    onClick={(e) => handleDelete(result.session_id, e)}
+                    disabled={deletingId === result.session_id}
+                    title="Delete session"
+                  >
+                    {deletingId === result.session_id ? '...' : '×'}
+                  </button>
                 </div>
               ))}
             </div>
@@ -203,7 +408,7 @@ function SessionList() {
       {searchResults === null && !loading && (
         <div className="grouped-sessions">
           <div className="session-count">
-            {sessions.length} session{sessions.length !== 1 ? 's' : ''} synced
+            {filteredSessions.length} session{filteredSessions.length !== 1 ? 's' : ''}{minLines > 0 ? ` (≥${minLines} lines)` : ''} synced
           </div>
 
           {Object.entries(groupedData).map(([machine, folders]) => (
@@ -223,12 +428,20 @@ function SessionList() {
 
               {expandedMachines.has(machine) && (
                 <div className="folders">
-                  {Object.entries(folders).map(([folder, folderData]) => {
+                  {sortFolders(Object.entries(folders), machine).map(([folder, folderData]) => {
                     const folderKey = `${machine}:${folder}`
                     const isExpanded = expandedFolders.has(folderKey)
+                    const folderIsPinned = isPinned(machine, folderData.fullPath)
                     return (
-                      <div key={folderKey} className="folder-group">
+                      <div key={folderKey} className={`folder-group ${folderIsPinned ? 'pinned' : ''}`}>
                         <div className="folder-header-row">
+                          <button
+                            className={`pin-btn ${folderIsPinned ? 'pinned' : ''}`}
+                            onClick={(e) => togglePin(machine, folderData.fullPath, e)}
+                            title={folderIsPinned ? 'Unpin folder' : 'Pin folder'}
+                          >
+                            {folderIsPinned ? '★' : '☆'}
+                          </button>
                           <div
                             className="folder-header"
                             onClick={() => toggleFolder(folderKey)}
@@ -241,6 +454,16 @@ function SessionList() {
                               ({folderData.sessions.length})
                             </span>
                           </div>
+                          <button
+                            className="select-all-btn"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              selectAllInFolder(folderData.sessions)
+                            }}
+                            title="Select all in folder"
+                          >
+                            {folderData.sessions.every(s => selectedIds.has(s.session_id)) ? '☑' : '☐'}
+                          </button>
                           {folderData.fullPath && (
                             <button
                               className={`copy-map-btn ${copiedKey === folderKey ? 'copied' : ''}`}
@@ -258,7 +481,14 @@ function SessionList() {
                         {isExpanded && (
                           <div className="session-list">
                             {folderData.sessions.map(session => (
-                              <div key={session.session_id} className="session-card">
+                              <div key={session.session_id} className={`session-card ${selectedIds.has(session.session_id) ? 'selected' : ''}`}>
+                                <input
+                                  type="checkbox"
+                                  className="session-checkbox"
+                                  checked={selectedIds.has(session.session_id)}
+                                  onChange={() => toggleSelect(session.session_id)}
+                                  onClick={(e) => e.stopPropagation()}
+                                />
                                 <Link to={`/sessions/${session.session_id}`}>
                                   <div className="session-id">{session.session_id.slice(0, 8)}</div>
                                   {session.first_message && (
@@ -273,6 +503,14 @@ function SessionList() {
                                     <span>{formatTimeAgo(session.updated_at)}</span>
                                   </div>
                                 </Link>
+                                <button
+                                  className="delete-btn"
+                                  onClick={(e) => handleDelete(session.session_id, e)}
+                                  disabled={deletingId === session.session_id}
+                                  title="Delete session"
+                                >
+                                  {deletingId === session.session_id ? '...' : '×'}
+                                </button>
                               </div>
                             ))}
                           </div>

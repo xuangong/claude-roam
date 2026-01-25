@@ -85,6 +85,17 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
             CREATE INDEX IF NOT EXISTS idx_segments_session ON segments(session_id);
             CREATE INDEX IF NOT EXISTS idx_users_provider ON users(provider, provider_id);
+
+            -- pinned_folders: 用户置顶的目录
+            CREATE TABLE IF NOT EXISTS pinned_folders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL REFERENCES users(id),
+                machine_name TEXT NOT NULL,
+                original_path TEXT NOT NULL,
+                pinned_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(user_id, machine_name, original_path)
+            );
+            CREATE INDEX IF NOT EXISTS idx_pinned_folders_user ON pinned_folders(user_id);
         """)
 
         # Migration: Add user_id column to sessions if not exists
@@ -151,10 +162,13 @@ async def get_sessions(
 ) -> tuple[list[dict], int]:
     """List sessions with optional search. Returns (sessions, total_count)."""
     if query:
+        # Escape special FTS5 characters by wrapping in double quotes
+        escaped_query = '"' + query.replace('"', '""') + '"'
+
         # Get total count
         count_cursor = await db.execute(
             "SELECT COUNT(*) FROM sessions_fts WHERE sessions_fts MATCH ?",
-            (query,),
+            (escaped_query,),
         )
         total = (await count_cursor.fetchone())[0]
 
@@ -172,7 +186,7 @@ async def get_sessions(
             ORDER BY s.updated_at DESC
             LIMIT ? OFFSET ?
             """,
-            (query, limit, offset),
+            (escaped_query, limit, offset),
         )
     else:
         # Get total count
@@ -376,6 +390,10 @@ async def search_content(
     query: str,
 ) -> list[dict]:
     """Search content full-text, return all matching sessions."""
+    # Escape special FTS5 characters by wrapping in double quotes
+    # This treats the query as a literal phrase search
+    escaped_query = '"' + query.replace('"', '""') + '"'
+
     cursor = await db.execute(
         """
         SELECT
@@ -389,7 +407,7 @@ async def search_content(
         GROUP BY s.session_id
         ORDER BY s.updated_at DESC
         """,
-        (query,),
+        (escaped_query,),
     )
     rows = await cursor.fetchall()
     results = []
@@ -570,3 +588,57 @@ async def update_session_user(
         (user_id, session_id),
     )
     await db.commit()
+
+
+# ============ Pinned Folders functions ============
+
+async def get_pinned_folders(
+    db: aiosqlite.Connection,
+    user_id: str,
+) -> list[dict]:
+    """Get pinned folders for a user."""
+    cursor = await db.execute(
+        """
+        SELECT * FROM pinned_folders
+        WHERE user_id = ?
+        ORDER BY pinned_at ASC
+        """,
+        (user_id,),
+    )
+    rows = await cursor.fetchall()
+    return [dict(row) for row in rows]
+
+
+async def add_pinned_folder(
+    db: aiosqlite.Connection,
+    user_id: str,
+    machine_name: str,
+    original_path: str,
+) -> None:
+    """Pin a folder for a user."""
+    await db.execute(
+        """
+        INSERT OR IGNORE INTO pinned_folders (user_id, machine_name, original_path)
+        VALUES (?, ?, ?)
+        """,
+        (user_id, machine_name, original_path),
+    )
+    await db.commit()
+
+
+async def remove_pinned_folder(
+    db: aiosqlite.Connection,
+    user_id: str,
+    machine_name: str,
+    original_path: str,
+) -> bool:
+    """Unpin a folder for a user."""
+    cursor = await db.execute(
+        """
+        DELETE FROM pinned_folders
+        WHERE user_id = ? AND machine_name = ? AND original_path = ?
+        """,
+        (user_id, machine_name, original_path),
+    )
+    await db.commit()
+    return cursor.rowcount > 0

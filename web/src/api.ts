@@ -2,6 +2,27 @@
  * API client for Claude Roam Web
  */
 
+/**
+ * Get auth headers if user is logged in
+ */
+function getAuthHeaders(): Record<string, string> {
+  const token = localStorage.getItem('auth_token');
+  if (token) {
+    return { Authorization: `Bearer ${token}` };
+  }
+  return {};
+}
+
+/**
+ * Custom error for authentication failures
+ */
+export class AuthError extends Error {
+  constructor(message = 'Authentication required') {
+    super(message);
+    this.name = 'AuthError';
+  }
+}
+
 export interface Segment {
   id: number;
   from_line: number;
@@ -96,7 +117,12 @@ export async function listSessions(
   params.set('limit', limit.toString());
   params.set('offset', offset.toString());
 
-  const response = await fetch(`${API_BASE}/sessions?${params.toString()}`);
+  const response = await fetch(`${API_BASE}/sessions?${params.toString()}`, {
+    headers: getAuthHeaders(),
+  });
+  if (response.status === 401) {
+    throw new AuthError();
+  }
   if (!response.ok) {
     throw new Error(`Failed to list sessions: ${response.status}`);
   }
@@ -106,7 +132,12 @@ export async function listSessions(
 export async function getSessionDetail(
   sessionId: string
 ): Promise<SessionDetailResponse> {
-  const response = await fetch(`${API_BASE}/sessions/${sessionId}`);
+  const response = await fetch(`${API_BASE}/sessions/${sessionId}`, {
+    headers: getAuthHeaders(),
+  });
+  if (response.status === 401) {
+    throw new AuthError();
+  }
   if (!response.ok) {
     throw new Error(`Failed to get session: ${response.status}`);
   }
@@ -114,7 +145,12 @@ export async function getSessionDetail(
 }
 
 export async function pullSession(sessionId: string): Promise<PullResponse> {
-  const response = await fetch(`${API_BASE}/sessions/${sessionId}/pull`);
+  const response = await fetch(`${API_BASE}/sessions/${sessionId}/pull`, {
+    headers: getAuthHeaders(),
+  });
+  if (response.status === 401) {
+    throw new AuthError();
+  }
   if (!response.ok) {
     throw new Error(`Failed to pull session: ${response.status}`);
   }
@@ -124,7 +160,11 @@ export async function pullSession(sessionId: string): Promise<PullResponse> {
 export async function deleteSession(sessionId: string): Promise<void> {
   const response = await fetch(`${API_BASE}/sessions/${sessionId}`, {
     method: 'DELETE',
+    headers: getAuthHeaders(),
   });
+  if (response.status === 401) {
+    throw new AuthError();
+  }
   if (!response.ok) {
     throw new Error(`Failed to delete session: ${response.status}`);
   }
@@ -140,7 +180,12 @@ export async function healthCheck(): Promise<boolean> {
 }
 
 export async function searchContent(query: string): Promise<SearchResponse> {
-  const response = await fetch(`${API_BASE}/search?q=${encodeURIComponent(query)}`);
+  const response = await fetch(`${API_BASE}/search?q=${encodeURIComponent(query)}`, {
+    headers: getAuthHeaders(),
+  });
+  if (response.status === 401) {
+    throw new AuthError();
+  }
   if (!response.ok) {
     throw new Error(`Failed to search: ${response.status}`);
   }
@@ -148,7 +193,12 @@ export async function searchContent(query: string): Promise<SearchResponse> {
 }
 
 export async function getGroupedSessions(): Promise<GroupedSessionsResponse> {
-  const response = await fetch(`${API_BASE}/sessions/grouped`);
+  const response = await fetch(`${API_BASE}/sessions/grouped`, {
+    headers: getAuthHeaders(),
+  });
+  if (response.status === 401) {
+    throw new AuthError();
+  }
   if (!response.ok) {
     throw new Error(`Failed to get grouped sessions: ${response.status}`);
   }
@@ -236,4 +286,69 @@ export function getAuthToken(): string | null {
  */
 export function isLoggedIn(): boolean {
   return !!getAuthToken();
+}
+
+
+// ============ Pinned Folders API ============
+
+export interface PinnedFolder {
+  id: number;
+  user_id: string;
+  machine_name: string;
+  original_path: string;
+  pinned_at: string;
+}
+
+export interface PinnedFoldersResponse {
+  folders: PinnedFolder[];
+}
+
+export async function getPinnedFolders(): Promise<PinnedFoldersResponse> {
+  const response = await fetch(`${API_BASE}/pinned-folders`, {
+    headers: getAuthHeaders(),
+  });
+  if (response.status === 401) {
+    throw new AuthError();
+  }
+  if (!response.ok) {
+    throw new Error(`Failed to get pinned folders: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function pinFolder(machineName: string, originalPath: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/pinned-folders`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...getAuthHeaders(),
+    },
+    body: JSON.stringify({
+      machine_name: machineName,
+      original_path: originalPath,
+    }),
+  });
+  if (response.status === 401) {
+    throw new AuthError();
+  }
+  if (!response.ok) {
+    throw new Error(`Failed to pin folder: ${response.status}`);
+  }
+}
+
+export async function unpinFolder(machineName: string, originalPath: string): Promise<void> {
+  const params = new URLSearchParams();
+  params.set('machine_name', machineName);
+  params.set('original_path', originalPath);
+
+  const response = await fetch(`${API_BASE}/pinned-folders?${params.toString()}`, {
+    method: 'DELETE',
+    headers: getAuthHeaders(),
+  });
+  if (response.status === 401) {
+    throw new AuthError();
+  }
+  if (!response.ok) {
+    throw new Error(`Failed to unpin folder: ${response.status}`);
+  }
 }

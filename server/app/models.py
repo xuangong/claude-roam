@@ -213,3 +213,28 @@ class OAuthCallbackRequest(BaseModel):
 
     code: str
     state: Optional[str] = None
+
+
+# ============ Pinned Folders Models ============
+
+class PinnedFolder(BaseModel):
+    """Pinned folder item."""
+
+    id: int
+    user_id: str
+    machine_name: str
+    original_path: str
+    pinned_at: str
+
+
+class PinnedFoldersResponse(BaseModel):
+    """Response for pinned folders endpoint."""
+
+    folders: list[PinnedFolder]
+
+
+class PinFolderRequest(BaseModel):
+    """Request to pin a folder."""
+
+    machine_name: str
+    original_path: str
