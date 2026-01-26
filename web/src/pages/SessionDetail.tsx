@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { Link, useParams } from 'react-router-dom'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import { getSessionDetail, pullSession, type SessionDetailResponse, type Segment } from '../api'
 import { MiniMap, type MiniMapItem } from '../components/MiniMap'
 import { MessageRow } from '../components/MessageComponents'
@@ -425,11 +426,10 @@ function SessionDetail() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  // MiniMap state - track conversation area visibility
-  const conversationRef = useRef<HTMLDivElement>(null)
-  const [visibleStart, setVisibleStart] = useState(0) // 0-1, portion of conversation above viewport
-  const [visibleEnd, setVisibleEnd] = useState(1)     // 0-1, portion of conversation visible end
-  const [minimapItems, setMinimapItems] = useState<MiniMapItem[]>([])
+  // Virtual scroll state
+  const parentRef = useRef<HTMLDivElement>(null)
+  const [visibleStart, setVisibleStart] = useState(0)
+  const [visibleEnd, setVisibleEnd] = useState(1)
 
   // Search state
   const [searchQuery, setSearchQuery] = useState('')
@@ -448,6 +448,52 @@ function SessionDetail() {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [])
 
+  // Virtual list setup
+  const virtualizer = useVirtualizer({
+    count: messages.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: useCallback((index: number) => {
+      const msg = messages[index]
+      if (!msg) return 80
+      switch (msg.displayType) {
+        case 'tree-separator': return 40
+        case 'human': return 100
+        case 'assistant': return 150
+        case 'tool_call': return 60
+        case 'tool_result': return 80
+        case 'system': return 50
+        default: return 80
+      }
+    }, [messages]),
+    overscan: 10,
+  })
+
+  // Update visible range for minimap
+  useEffect(() => {
+    const range = virtualizer.range
+    if (range && messages.length > 0) {
+      setVisibleStart(range.startIndex / messages.length)
+      setVisibleEnd(Math.min(1, (range.endIndex + 1) / messages.length))
+    }
+  }, [virtualizer.range, messages.length])
+
+  // Build minimap items from messages
+  const minimapItems = useMemo<MiniMapItem[]>(() => {
+    if (messages.length === 0) return []
+
+    return messages.map((msg, i) => {
+      const item: MiniMapItem = {
+        type: msg.displayType,
+        index: i,
+        heightRatio: 1 / messages.length  // Equal height for simplicity
+      }
+      if (msg.displayType === 'tree-separator' && msg.treeIndex) {
+        item.treeIndex = msg.treeIndex
+      }
+      return item
+    })
+  }, [messages])
+
   // Search results - message indices with matches
   const searchResults = useMemo(() => {
     if (!searchQuery.trim()) return []
@@ -465,30 +511,46 @@ function SessionDetail() {
     return results
   }, [messages, searchQuery])
 
-  // Scroll to search result
-  const scrollToMessage = useCallback((index: number) => {
-    if (!conversationRef.current) return
-    const children = conversationRef.current.children
-    if (index >= 0 && index < children.length) {
-      const targetElement = children[index] as HTMLElement
-      targetElement.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  // Ref to track ongoing search scroll target
+  const searchScrollTargetRef = useRef<number | null>(null)
+
+  // Scroll to search result with retry logic for virtual scrolling
+  const scrollToSearchResult = useCallback((messageIndex: number) => {
+    searchScrollTargetRef.current = messageIndex
+
+    const scrollToTarget = () => {
+      if (searchScrollTargetRef.current !== messageIndex) return
+      if (!parentRef.current) return
+
+      virtualizer.scrollToIndex(messageIndex, { align: 'center' })
+
+      // Check if we need to keep adjusting
+      const range = virtualizer.range
+      if (range) {
+        const isInView = messageIndex >= range.startIndex && messageIndex <= range.endIndex
+        if (!isInView) {
+          requestAnimationFrame(scrollToTarget)
+        }
+      }
     }
-  }, [])
+
+    scrollToTarget()
+  }, [virtualizer])
 
   // Navigate search results
   const goToNextResult = useCallback(() => {
     if (searchResults.length === 0) return
     const newIndex = currentSearchIndex >= searchResults.length - 1 ? 0 : currentSearchIndex + 1
     setCurrentSearchIndex(newIndex)
-    scrollToMessage(searchResults[newIndex])
-  }, [searchResults, currentSearchIndex, scrollToMessage])
+    scrollToSearchResult(searchResults[newIndex])
+  }, [searchResults, currentSearchIndex, scrollToSearchResult])
 
   const goToPrevResult = useCallback(() => {
     if (searchResults.length === 0) return
     const newIndex = currentSearchIndex <= 0 ? searchResults.length - 1 : currentSearchIndex - 1
     setCurrentSearchIndex(newIndex)
-    scrollToMessage(searchResults[newIndex])
-  }, [searchResults, currentSearchIndex, scrollToMessage])
+    scrollToSearchResult(searchResults[newIndex])
+  }, [searchResults, currentSearchIndex, scrollToSearchResult])
 
   const handleSearchClose = useCallback(() => {
     setShowSearch(false)
@@ -499,129 +561,24 @@ function SessionDetail() {
   // Handle click on search result marker in minimap
   const handleSearchResultClick = useCallback((searchIndex: number) => {
     setCurrentSearchIndex(searchIndex)
-    scrollToMessage(searchResults[searchIndex])
-  }, [searchResults, scrollToMessage])
+    scrollToSearchResult(searchResults[searchIndex])
+  }, [searchResults, scrollToSearchResult])
 
   // Reset search index when query changes
   useEffect(() => {
     if (searchResults.length > 0) {
       setCurrentSearchIndex(0)
-      scrollToMessage(searchResults[0])
+      scrollToSearchResult(searchResults[0])
     } else {
       setCurrentSearchIndex(-1)
     }
-  }, [searchQuery, searchResults, scrollToMessage])
+  }, [searchQuery, searchResults, scrollToSearchResult])
 
-  // Measure actual message heights after render
-  useEffect(() => {
-    if (!conversationRef.current || messages.length === 0) return
-
-    const measureHeights = () => {
-      if (!conversationRef.current) return
-
-      const container = conversationRef.current
-      const children = container.children
-      const containerTop = container.getBoundingClientRect().top + window.scrollY
-      const totalHeight = container.scrollHeight
-
-      if (totalHeight <= 0 || children.length === 0) return
-
-      const items: MiniMapItem[] = []
-      let sumRatio = 0
-      for (let i = 0; i < children.length && i < messages.length; i++) {
-        const child = children[i] as HTMLElement
-        const childRect = child.getBoundingClientRect()
-        const childTop = childRect.top + window.scrollY - containerTop
-
-        // Calculate the ratio including the gap space after this element
-        const nextChildTop = i < children.length - 1
-          ? (children[i + 1] as HTMLElement).getBoundingClientRect().top + window.scrollY - containerTop
-          : totalHeight
-        const heightWithGap = nextChildTop - childTop
-        const ratio = heightWithGap / totalHeight
-        sumRatio += ratio
-
-        const item: MiniMapItem = {
-          type: messages[i].displayType,
-          index: i,
-          heightRatio: ratio
-        }
-        // Pass treeIndex for tree-separator items
-        if (messages[i].displayType === 'tree-separator' && messages[i].treeIndex) {
-          item.treeIndex = messages[i].treeIndex
-        }
-        items.push(item)
-      }
-      setMinimapItems(items)
-    }
-
-    // Measure after DOM settles
-    const timer = setTimeout(measureHeights, 100)
-
-    // Re-measure on resize
-    const resizeObserver = new ResizeObserver(measureHeights)
-    resizeObserver.observe(conversationRef.current)
-
-    return () => {
-      clearTimeout(timer)
-      resizeObserver.disconnect()
-    }
-  }, [messages])
-
-  // Handle scroll - calculate which portion of conversation is visible
-  const handleScroll = useCallback(() => {
-    if (!conversationRef.current) return
-
-    const rect = conversationRef.current.getBoundingClientRect()
-    // Use scrollHeight to match minimap item measurement
-    const conversationHeight = conversationRef.current.scrollHeight
-    const viewportHeight = window.innerHeight
-
-    if (conversationHeight <= 0) return
-
-    // rect.top: distance from viewport top to conversation top
-    // When conversation top is above viewport: rect.top < 0
-    // When conversation top is below viewport: rect.top > 0
-
-    // visibleTop: how much of conversation is above the viewport (hidden at top)
-    const visibleTop = Math.max(0, -rect.top)
-
-    // visibleBottom: how far into conversation the viewport bottom reaches
-    // viewportHeight - rect.top = distance from conversation top to viewport bottom
-    const visibleBottom = Math.min(conversationHeight, Math.max(0, viewportHeight - rect.top))
-
-    // Convert to ratios (0-1)
-    const startRatio = visibleTop / conversationHeight
-    const endRatio = visibleBottom / conversationHeight
-
-    setVisibleStart(Math.max(0, Math.min(1, startRatio)))
-    setVisibleEnd(Math.max(0, Math.min(1, endRatio)))
-  }, [])
-
-  // Navigate via minimap - scroll to show that portion of conversation
+  // Navigate via minimap
   const handleMinimapNavigate = useCallback((ratio: number) => {
-    if (!conversationRef.current) return
-
-    const rect = conversationRef.current.getBoundingClientRect()
-    const conversationHeight = conversationRef.current.scrollHeight
-    const targetOffset = ratio * conversationHeight
-
-    // Calculate where to scroll the page
-    const currentTop = window.scrollY + rect.top
-    const targetScroll = currentTop + targetOffset - window.innerHeight / 3
-
-    window.scrollTo({ top: Math.max(0, targetScroll), behavior: 'auto' })
-  }, [])
-
-  useEffect(() => {
-    window.addEventListener('scroll', handleScroll)
-    window.addEventListener('resize', handleScroll)
-    handleScroll()
-    return () => {
-      window.removeEventListener('scroll', handleScroll)
-      window.removeEventListener('resize', handleScroll)
-    }
-  }, [handleScroll, messages])
+    const targetIndex = Math.floor(ratio * messages.length)
+    virtualizer.scrollToIndex(targetIndex, { align: 'start' })
+  }, [messages.length, virtualizer])
 
   useEffect(() => {
     if (!id) return
@@ -668,6 +625,8 @@ function SessionDetail() {
     return null
   }
 
+  const virtualItems = virtualizer.getVirtualItems()
+
   return (
     <div className="detail-page">
       <Link to="/" className="back-link">Back to sessions</Link>
@@ -676,6 +635,7 @@ function SessionDetail() {
         <h1>{detail.session.session_id}</h1>
         <div className="detail-meta">
           <span>{detail.session.total_lines} lines</span>
+          <span>{messages.length} messages</span>
           <span>Created: {formatDateTime(detail.session.created_at)}</span>
           <span>Updated: {formatDateTime(detail.session.updated_at)}</span>
           <button
@@ -737,20 +697,47 @@ function SessionDetail() {
       <div className="section conversation-section">
         <h2>Conversation</h2>
         <div className="conversation-container">
-          <div className="conversation-flow" ref={conversationRef}>
+          <div
+            className="conversation-flow virtual-scroll-container"
+            ref={parentRef}
+            style={{ height: 'calc(100vh - 350px)', overflow: 'auto' }}
+          >
             {messages.length === 0 ? (
               <div className="empty-conversation">
                 No conversation data to display
               </div>
             ) : (
-              messages.map((msg, i) => (
-                <MessageRow
-                  key={i}
-                  msg={msg}
-                  searchQuery={searchQuery}
-                  isSearchMatch={searchResults.includes(i)}
-                />
-              ))
+              <div
+                style={{
+                  height: `${virtualizer.getTotalSize()}px`,
+                  width: '100%',
+                  position: 'relative',
+                }}
+              >
+                {virtualItems.map((virtualRow) => {
+                  const msg = messages[virtualRow.index]
+                  return (
+                    <div
+                      key={virtualRow.key}
+                      data-index={virtualRow.index}
+                      ref={virtualizer.measureElement}
+                      style={{
+                        position: 'absolute',
+                        top: 0,
+                        left: 0,
+                        width: '100%',
+                        transform: `translateY(${virtualRow.start}px)`,
+                      }}
+                    >
+                      <MessageRow
+                        msg={msg}
+                        searchQuery={searchQuery}
+                        isSearchMatch={searchResults.includes(virtualRow.index)}
+                      />
+                    </div>
+                  )
+                })}
+              </div>
             )}
           </div>
           {messages.length > 0 && (
