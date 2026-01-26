@@ -1,81 +1,10 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { getSessionDetail, pullSession, type SessionDetailResponse, type Segment } from '../api'
 import { MiniMap, type MiniMapItem } from '../components/MiniMap'
-
-// Content block types for terminal display
-interface TextBlock {
-  type: 'text'
-  content: string
-}
-
-interface ToolUseBlock {
-  type: 'tool_use'
-  id: string
-  name: string
-  input: Record<string, unknown>
-}
-
-interface ToolResultBlock {
-  type: 'tool_result'
-  tool_use_id: string
-  content: string
-  is_error?: boolean
-}
-
-type ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock
-
-// Display types for the terminal - clearer naming for LLM chatbot
-type DisplayType = 'human' | 'assistant' | 'tool_call' | 'tool_result' | 'system' | 'tree-separator'
-
-interface DisplayMessage {
-  displayType: DisplayType
-  blocks: ContentBlock[]
-  toolName?: string  // For tool_call and tool_result
-  toolId?: string    // To link tool_call with tool_result
-  raw?: Record<string, unknown>  // For system/other messages
-  // For tree-separator
-  treeIndex?: number
-  treeSummaryCount?: number
-  treeTimestamp?: string
-}
-
-// Store tool_use info to link with results
-interface ToolUseInfo {
-  id: string
-  name: string
-}
-
-// Raw message from JSONL (for tree building)
-interface RawMessage {
-  uuid?: string
-  parentUuid?: string | null
-  type: string
-  timestamp?: string
-  message?: {
-    content: string | ContentItem[]
-  }
-  summary?: string
-  leafUuid?: string
-  treeIndex?: number
-  treeSummaryCount?: number
-  treeMessageCount?: number
-  // System message fields
-  subtype?: string
-  content?: string
-  stopReason?: string
-}
-
-interface ContentItem {
-  type: string
-  text?: string
-  id?: string
-  name?: string
-  input?: Record<string, unknown>
-  tool_use_id?: string
-  content?: string | { text?: string }[]
-  is_error?: boolean
-}
+import { MessageRow } from '../components/MessageComponents'
+import type { DisplayMessage, ContentBlock, RawMessage, ToolUseInfo } from '../types/message'
+import { formatDateTime } from '../utils/format'
 
 // Build conversation tree and extract all conversation chains
 function buildConversationTree(data: string): RawMessage[] {
@@ -488,180 +417,6 @@ function parseMessages(data: string): DisplayMessage[] {
   return messages
 }
 
-function formatDateTime(dateStr: string): string {
-  const date = new Date(dateStr)
-  return date.toLocaleString('en-US', {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit'
-  })
-}
-
-// Tool call display - shows what Claude is invoking
-function ToolCallDisplay({ name, input }: { name: string; input: Record<string, unknown> }) {
-  const [isExpanded, setIsExpanded] = useState(false)
-
-  // Custom JSON formatter that displays string values with actual newlines/tabs
-  const formatInputForDisplay = (obj: Record<string, unknown>, indent = 0): string => {
-    const spaces = '  '.repeat(indent)
-    const lines: string[] = ['{']
-    const entries = Object.entries(obj)
-
-    entries.forEach(([key, value], idx) => {
-      const comma = idx < entries.length - 1 ? ',' : ''
-      const keyStr = `${spaces}  "${key}": `
-
-      if (typeof value === 'string') {
-        // For strings, show the actual content (newlines rendered, not escaped)
-        if (value.includes('\n') || value.length > 80) {
-          // Multi-line string: show as block
-          lines.push(`${keyStr}`)
-          lines.push(`${spaces}    \`\`\``)
-          lines.push(value)
-          lines.push(`${spaces}    \`\`\`${comma}`)
-        } else {
-          // Short string: show inline
-          lines.push(`${keyStr}"${value}"${comma}`)
-        }
-      } else if (value === null) {
-        lines.push(`${keyStr}null${comma}`)
-      } else if (typeof value === 'boolean' || typeof value === 'number') {
-        lines.push(`${keyStr}${value}${comma}`)
-      } else if (Array.isArray(value)) {
-        lines.push(`${keyStr}${JSON.stringify(value, null, 2).split('\n').join('\n' + spaces + '  ')}${comma}`)
-      } else if (typeof value === 'object') {
-        lines.push(`${keyStr}${JSON.stringify(value, null, 2).split('\n').join('\n' + spaces + '  ')}${comma}`)
-      } else {
-        lines.push(`${keyStr}${JSON.stringify(value)}${comma}`)
-      }
-    })
-
-    lines.push(`${spaces}}`)
-    return lines.join('\n')
-  }
-
-  const inputStr = formatInputForDisplay(input)
-
-  // Get a preview of the most relevant input parameter
-  const getInputPreview = () => {
-    if (input.command) return String(input.command).slice(0, 60).replace(/\n/g, ' ')
-    if (input.file_path) return String(input.file_path)
-    if (input.pattern) return `pattern: ${input.pattern}`
-    if (input.query) return String(input.query).slice(0, 60).replace(/\n/g, ' ')
-    if (input.content) return `${String(input.content).slice(0, 40).replace(/\n/g, ' ')}...`
-    if (input.prompt) return String(input.prompt).slice(0, 60).replace(/\n/g, ' ')
-    const firstKey = Object.keys(input)[0]
-    if (firstKey) {
-      const val = String(input[firstKey]).slice(0, 50).replace(/\n/g, ' ')
-      return `${firstKey}: ${val}`
-    }
-    return ''
-  }
-
-  const preview = getInputPreview()
-
-  return (
-    <div className="tool-call-block">
-      <div
-        className="tool-call-header"
-        onClick={() => setIsExpanded(!isExpanded)}
-      >
-        <span className="tool-call-arrow">→</span>
-        <span className="tool-call-label">Tool Call</span>
-        <span className="tool-call-name">{name}</span>
-        {preview && !isExpanded && (
-          <span className="tool-call-preview">{preview}</span>
-        )}
-        <span className="tool-call-expand">{isExpanded ? '▲' : '▼'}</span>
-      </div>
-      {isExpanded && (
-        <pre className="tool-call-input">{inputStr}</pre>
-      )}
-    </div>
-  )
-}
-
-// Tool result display - shows what the tool returned (collapsed by default)
-function ToolResultDisplay({
-  content,
-  is_error,
-  toolName
-}: {
-  content: string
-  is_error?: boolean
-  toolName?: string
-}) {
-  const [isExpanded, setIsExpanded] = useState(false)
-  const lines = content.split('\n')
-  const previewLines = lines.slice(0, 3).join('\n')
-  const hasMore = lines.length > 3 || content.length > 200
-
-  return (
-    <div className={`tool-result-block ${is_error ? 'error' : ''}`}>
-      <div
-        className="tool-result-header"
-        onClick={() => setIsExpanded(!isExpanded)}
-        style={{ cursor: 'pointer' }}
-      >
-        <span className="tool-result-arrow">←</span>
-        <span className="tool-result-label">
-          {is_error ? 'Error' : 'Result'}
-        </span>
-        {toolName && (
-          <span className="tool-result-from">from {toolName}</span>
-        )}
-        <span className="tool-result-meta">
-          {lines.length} lines
-        </span>
-        <span className="tool-result-icon">{is_error ? '✗' : '✓'}</span>
-        <span className="tool-result-expand">{isExpanded ? '▲' : '▼'}</span>
-      </div>
-      {isExpanded && (
-        <pre className="tool-content">{content}</pre>
-      )}
-      {!isExpanded && hasMore && (
-        <pre className="tool-content tool-content-preview">{previewLines}...</pre>
-      )}
-      {!isExpanded && !hasMore && (
-        <pre className="tool-content tool-content-preview">{content}</pre>
-      )}
-    </div>
-  )
-}
-
-// System message display (collapsed by default)
-function SystemDisplay({ blocks, raw }: { blocks?: ContentBlock[]; raw?: Record<string, unknown> }) {
-  const [isExpanded, setIsExpanded] = useState(false)
-  const subtype = (raw?.subtype as string) || (raw?.type as string) || 'system'
-  const textContent = blocks?.find(b => b.type === 'text')?.content
-
-  return (
-    <div className="system-block">
-      <div
-        className="system-block-header"
-        onClick={() => setIsExpanded(!isExpanded)}
-      >
-        <span className="system-block-icon">⚙</span>
-        <span className="system-block-label">System</span>
-        <span className="system-block-subtype">{subtype}</span>
-        <span className="system-block-expand">{isExpanded ? '▲' : '▼'}</span>
-      </div>
-      {isExpanded && (
-        <div className="system-block-content">
-          {textContent && <div style={{ marginBottom: raw ? 'var(--space-2)' : 0 }}>{textContent}</div>}
-          {raw && (
-            <pre style={{ margin: 0, opacity: 0.7 }}>
-              {JSON.stringify(raw, null, 2)}
-            </pre>
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
-
 function SessionDetail() {
   const { id } = useParams<{ id: string }>()
   const [detail, setDetail] = useState<SessionDetailResponse | null>(null)
@@ -674,6 +429,62 @@ function SessionDetail() {
   const [visibleStart, setVisibleStart] = useState(0) // 0-1, portion of conversation above viewport
   const [visibleEnd, setVisibleEnd] = useState(1)     // 0-1, portion of conversation visible end
   const [minimapItems, setMinimapItems] = useState<MiniMapItem[]>([])
+
+  // Search state
+  const [searchQuery, setSearchQuery] = useState('')
+  const [currentSearchIndex, setCurrentSearchIndex] = useState(-1)
+
+  // Search results - message indices with matches
+  const searchResults = useMemo(() => {
+    if (!searchQuery.trim()) return []
+    const query = searchQuery.toLowerCase()
+    const results: number[] = []
+    messages.forEach((msg, index) => {
+      const hasMatch = msg.blocks.some(block => {
+        if (block.type === 'text' && block.content.toLowerCase().includes(query)) return true
+        if (block.type === 'tool_use' && block.name.toLowerCase().includes(query)) return true
+        if (block.type === 'tool_result' && block.content.toLowerCase().includes(query)) return true
+        return false
+      })
+      if (hasMatch) results.push(index)
+    })
+    return results
+  }, [messages, searchQuery])
+
+  // Scroll to search result
+  const scrollToMessage = useCallback((index: number) => {
+    if (!conversationRef.current) return
+    const children = conversationRef.current.children
+    if (index >= 0 && index < children.length) {
+      const targetElement = children[index] as HTMLElement
+      targetElement.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }
+  }, [])
+
+  // Navigate search results
+  const goToNextResult = useCallback(() => {
+    if (searchResults.length === 0) return
+    const newIndex = currentSearchIndex >= searchResults.length - 1 ? 0 : currentSearchIndex + 1
+    setCurrentSearchIndex(newIndex)
+    scrollToMessage(searchResults[newIndex])
+  }, [searchResults, currentSearchIndex, scrollToMessage])
+
+  const goToPrevResult = useCallback(() => {
+    if (searchResults.length === 0) return
+    const newIndex = currentSearchIndex <= 0 ? searchResults.length - 1 : currentSearchIndex - 1
+    setCurrentSearchIndex(newIndex)
+    scrollToMessage(searchResults[newIndex])
+  }, [searchResults, currentSearchIndex, scrollToMessage])
+
+  // Reset search index when query changes
+  useEffect(() => {
+    if (searchResults.length > 0) {
+      setCurrentSearchIndex(0)
+      scrollToMessage(searchResults[0])
+    } else {
+      setCurrentSearchIndex(-1)
+    }
+  }, [searchQuery, searchResults, scrollToMessage])
 
   // Measure actual message heights after render
   useEffect(() => {
@@ -842,6 +653,25 @@ function SessionDetail() {
           <span>Created: {formatDateTime(detail.session.created_at)}</span>
           <span>Updated: {formatDateTime(detail.session.updated_at)}</span>
         </div>
+        {/* Search bar */}
+        <div className="search-box">
+          <input
+            type="text"
+            placeholder="Search messages..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="search-input"
+          />
+          {searchResults.length > 0 && (
+            <>
+              <span className="search-count">
+                {currentSearchIndex + 1} / {searchResults.length}
+              </span>
+              <button onClick={goToPrevResult} className="search-nav-btn" title="Previous">↑</button>
+              <button onClick={goToNextResult} className="search-nav-btn" title="Next">↓</button>
+            </>
+          )}
+        </div>
       </div>
 
       <div className="section">
@@ -879,83 +709,14 @@ function SessionDetail() {
                 No conversation data to display
               </div>
             ) : (
-              messages.map((msg, i) => {
-                // Tree separator - shows conversation tree index
-                if (msg.displayType === 'tree-separator') {
-                  return (
-                    <div key={i} className="tree-separator">
-                      <div className="tree-separator-line" />
-                      <div className="tree-separator-label">
-                        Conversation {msg.treeIndex}
-                        {msg.treeSummaryCount ? ` (${msg.treeSummaryCount} summarized branches)` : ''}
-                      </div>
-                      <div className="tree-separator-line" />
-                    </div>
-                  )
-                }
-
-                // Human message - user input text
-                if (msg.displayType === 'human') {
-                  return (
-                    <div key={i} className="message human">
-                      <div className="message-role">
-                        <span className="role-icon">❯</span> Human
-                      </div>
-                      <div className="message-content">
-                        {msg.blocks.map((b, j) => (
-                          b.type === 'text' ? <span key={j}>{b.content}</span> : null
-                        ))}
-                      </div>
-                    </div>
-                  )
-                }
-
-                // Assistant message - Claude's text response
-                if (msg.displayType === 'assistant') {
-                  return (
-                    <div key={i} className="message assistant">
-                      <div className="message-role">
-                        <span className="role-icon">◆</span> Assistant
-                      </div>
-                      <div className="message-content">
-                        {msg.blocks.map((b, j) => (
-                          b.type === 'text' ? <span key={j}>{b.content}</span> : null
-                        ))}
-                      </div>
-                    </div>
-                  )
-                }
-
-                // Tool call - Claude invoking a tool
-                if (msg.displayType === 'tool_call') {
-                  const block = msg.blocks[0]
-                  if (block?.type === 'tool_use') {
-                    return <ToolCallDisplay key={i} name={block.name} input={block.input} />
-                  }
-                }
-
-                // Tool result - Result returned from tool
-                if (msg.displayType === 'tool_result') {
-                  const block = msg.blocks[0]
-                  if (block?.type === 'tool_result') {
-                    return (
-                      <ToolResultDisplay
-                        key={i}
-                        content={block.content}
-                        is_error={block.is_error}
-                        toolName={msg.toolName}
-                      />
-                    )
-                  }
-                }
-
-                // System messages - collapsed by default
-                if (msg.displayType === 'system') {
-                  return <SystemDisplay key={i} blocks={msg.blocks} raw={msg.raw} />
-                }
-
-                return null
-              })
+              messages.map((msg, i) => (
+                <MessageRow
+                  key={i}
+                  msg={msg}
+                  searchQuery={searchQuery}
+                  isSearchMatch={searchResults.includes(i)}
+                />
+              ))
             )}
           </div>
           {messages.length > 0 && (
@@ -964,6 +725,9 @@ function SessionDetail() {
               visibleStart={visibleStart}
               visibleEnd={visibleEnd}
               onNavigate={handleMinimapNavigate}
+              totalMessages={messages.length}
+              searchResults={searchResults}
+              currentSearchIndex={currentSearchIndex}
             />
           )}
         </div>

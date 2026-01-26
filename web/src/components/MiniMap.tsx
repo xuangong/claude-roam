@@ -7,18 +7,12 @@ export interface MiniMapItem {
   treeIndex?: number  // For tree-separator items
 }
 
-export interface SeparatorPosition {
-  ratio: number
-  index: number
-}
-
 interface MiniMapProps {
   items: MiniMapItem[]
   visibleStart: number
   visibleEnd: number
   onNavigate: (ratio: number) => void
   totalMessages?: number  // For position indicator
-  separatorPositions?: SeparatorPosition[]  // Pre-calculated separator positions
   searchResults?: number[]  // Message indices with search matches
   currentSearchIndex?: number  // Currently focused search result
 }
