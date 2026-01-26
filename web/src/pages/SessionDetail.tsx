@@ -60,6 +60,10 @@ interface RawMessage {
   treeIndex?: number
   treeSummaryCount?: number
   treeMessageCount?: number
+  // System message fields
+  subtype?: string
+  content?: string
+  stopReason?: string
 }
 
 interface ContentItem {
@@ -353,9 +357,21 @@ function parseMessages(data: string): DisplayMessage[] {
 
     // Handle system messages (hooks, etc.)
     if (topType === 'system') {
+      const subtype = obj.subtype as string || ''
+      const content = obj.content as string || ''
+      let displayContent = ''
+
+      if (subtype === 'compact_boundary') {
+        displayContent = '[Compact Boundary] ' + content
+      } else if (subtype === 'stop_hook_summary') {
+        displayContent = '[Hook] ' + ((obj.stopReason as string) || content || 'hook executed')
+      } else if (content) {
+        displayContent = content
+      }
+
       messages.push({
         displayType: 'system',
-        blocks: [],
+        blocks: displayContent ? [{ type: 'text', content: displayContent }] : [],
         raw: obj as unknown as Record<string, unknown>
       })
       continue
@@ -365,7 +381,7 @@ function parseMessages(data: string): DisplayMessage[] {
     if (topType === 'summary') {
       messages.push({
         displayType: 'system',
-        blocks: [{ type: 'text', content: `Summary: ${obj.summary || ''}` }],
+        blocks: [{ type: 'text', content: `[Compacted] ${obj.summary || ''}` }],
         raw: obj as unknown as Record<string, unknown>
       })
       continue
@@ -616,9 +632,10 @@ function ToolResultDisplay({
 }
 
 // System message display (collapsed by default)
-function SystemDisplay({ raw }: { raw?: Record<string, unknown> }) {
+function SystemDisplay({ blocks, raw }: { blocks?: ContentBlock[]; raw?: Record<string, unknown> }) {
   const [isExpanded, setIsExpanded] = useState(false)
   const subtype = (raw?.subtype as string) || (raw?.type as string) || 'system'
+  const textContent = blocks?.find(b => b.type === 'text')?.content
 
   return (
     <div className="system-block">
@@ -631,10 +648,15 @@ function SystemDisplay({ raw }: { raw?: Record<string, unknown> }) {
         <span className="system-block-subtype">{subtype}</span>
         <span className="system-block-expand">{isExpanded ? '▲' : '▼'}</span>
       </div>
-      {isExpanded && raw && (
-        <pre className="system-block-content">
-          {JSON.stringify(raw, null, 2)}
-        </pre>
+      {isExpanded && (
+        <div className="system-block-content">
+          {textContent && <div style={{ marginBottom: raw ? 'var(--space-2)' : 0 }}>{textContent}</div>}
+          {raw && (
+            <pre style={{ margin: 0, opacity: 0.7 }}>
+              {JSON.stringify(raw, null, 2)}
+            </pre>
+          )}
+        </div>
       )}
     </div>
   )
@@ -929,7 +951,7 @@ function SessionDetail() {
 
                 // System messages - collapsed by default
                 if (msg.displayType === 'system') {
-                  return <SystemDisplay key={i} raw={msg.raw} />
+                  return <SystemDisplay key={i} blocks={msg.blocks} raw={msg.raw} />
                 }
 
                 return null

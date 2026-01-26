@@ -161,6 +161,7 @@ claude-roam pull -c 20        # 指定并发数（默认 20）
 - 作为用户，我希望查看会话来自哪台机器、哪个目录
 - 作为用户，我希望预览会话内容
 - 作为用户，我希望一键复制目录映射命令
+- 作为用户，我希望在会话内容中搜索关键词并高亮显示
 
 **功能细节**:
 
@@ -173,13 +174,24 @@ claude-roam pull -c 20        # 指定并发数（默认 20）
 **会话详情页**:
 - 显示完整元信息
 - 显示来源追踪（哪些行来自哪台机器）
-- 对话预览
+- 对话预览（虚拟滚动，支持大量消息）
+- **MiniMap 导航**: 右侧显示消息类型缩略图，支持快速跳转
+- **会话内搜索**: 搜索关键词高亮，搜索结果在 MiniMap 上标记
+- **消息类型展示**:
+  - Human (青色) / Assistant (紫色) 消息
+  - Tool Call / Tool Result 可展开查看详情
+  - System 消息（compact_boundary, hook 等）可展开查看 JSON 详情
+  - Tree Separator 标记不同对话树
+- **缓存刷新**: 支持清除 IndexedDB 缓存重新解析
 
 **验收标准**:
 - [x] 搜索响应时间 < 500ms
 - [x] 列表按目录分组显示
 - [x] 详情页显示完整 segment 信息
 - [x] 提供一键复制映射命令
+- [x] MiniMap 显示消息类型颜色和 ruler 刻度
+- [x] 会话内搜索高亮和 MiniMap 标记
+- [x] System 消息显示内容和 JSON 详情
 
 ---
 
@@ -304,6 +316,7 @@ claude-roam import <file.roam> -y     # 跳过确认
 **用户故事**:
 - 作为用户，我希望快速预览本地会话内容
 - 作为用户，我希望在没有网络的情况下也能浏览会话历史
+- 作为用户，我希望在预览中搜索关键词
 
 **命令**:
 ```bash
@@ -318,11 +331,32 @@ claude-roam preview <file.roam>       # 预览指定 .roam 文件
 - 支持暗色/亮色主题切换
 - 复用 Web UI 的消息解析和 MiniMap 组件
 
+**功能特性**:
+- **虚拟滚动**: 使用 IndexedDB 缓存消息，支持大量消息的流畅滚动
+- **MiniMap 导航**:
+  - 左侧 ruler 显示对话树编号，点击快速跳转
+  - 消息类型颜色区分（Human/Assistant/Tool/System）
+  - 当前可视区域高亮显示
+  - 拖拽调整高度和位置
+- **会话内搜索**:
+  - 搜索框支持 Enter/Shift+Enter 导航
+  - 搜索词在消息中高亮显示
+  - 搜索结果在 MiniMap 右侧标记（橙色）
+- **消息展示**:
+  - Human/Assistant 消息支持搜索高亮
+  - Tool Call/Tool Result 可展开查看详情
+  - System 消息显示 subtype 和 JSON 详情
+  - Tree Separator 显示对话树编号和时间戳
+- **缓存管理**: Refresh 按钮清除 IndexedDB 缓存重新解析
+
 **验收标准**:
 - [x] 自动打开浏览器显示预览
 - [x] 支持中文内容正确显示
 - [x] 支持暗色/亮色主题
 - [x] 无需网络连接即可工作
+- [x] MiniMap ruler 与对话树位置对齐
+- [x] 搜索高亮和 MiniMap 标记正常工作
+- [x] System 消息可展开查看 JSON 详情
 
 ---
 

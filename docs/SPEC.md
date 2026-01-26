@@ -625,7 +625,7 @@ for (const session of sessions) {
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  ← Back                                                     │
+│  ← Back                     [🔍 ____________]  [↻ Refresh]  │
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
 │  Session: ba2699dc-37bc-4974-a422-7989f0d4fabc             │
@@ -639,10 +639,13 @@ for (const session of sessions) {
 │  └─────────────────────────────────────────────────────┘   │
 │                                                             │
 │  ─────────────────────────────────────────────────────────  │
-│  Preview:                                                   │
+│  Messages:                                        [MiniMap] │
 │  ┌─────────────────────────────────────────────────────┐   │
 │  │ User: 调研claude code的对话历史是怎么管理的          │   │
 │  │ Assistant: 我来帮你调研 Claude Code...               │   │
+│  │ ⚙ System [▼]                                        │   │
+│  │   [Compact Boundary] Conversation compacted          │   │
+│  │   {"subtype":"compact_boundary",...}                 │   │
 │  │ ...                                                  │   │
 │  └─────────────────────────────────────────────────────┘   │
 │                                                             │
@@ -650,6 +653,197 @@ for (const session of sessions) {
 ```
 
 **注意**: 详情页不再显示 `pull <session-id>` 命令，因为 pull 必须基于目录映射。
+
+### 5.4 MiniMap 组件
+
+**功能**:
+- 右侧浮动的小地图，显示整个对话的缩略视图
+- 可拖拽移动位置，可调整高度
+- 显示当前可视区域（viewport）
+- 左侧标尺显示对话树编号，点击可快速跳转
+- 搜索结果在扩展区域以橙色标记显示
+
+**Props**:
+```typescript
+interface MiniMapProps {
+  items: MiniMapItem[]           // 缩略图项目列表
+  visibleStart: number           // 可视区域起始比例 (0-1)
+  visibleEnd: number             // 可视区域结束比例 (0-1)
+  onNavigate: (ratio: number) => void  // 跳转回调
+  totalMessages?: number         // 总消息数（用于位置指示器）
+  searchResults?: number[]       // 搜索匹配的消息索引
+  currentSearchIndex?: number    // 当前聚焦的搜索结果
+}
+
+interface MiniMapItem {
+  type: string                   // user | assistant | system | summary | tree-separator
+  index: number                  // 原始消息索引
+  heightRatio: number            // 高度比例
+  treeIndex?: number             // 对话树索引（仅 tree-separator）
+}
+```
+
+**状态持久化**:
+- 位置：`localStorage.getItem('minimap-position')` → `{ top, right }`
+- 高度：`localStorage.getItem('minimap-height')` → number
+
+### 5.5 搜索功能
+
+**UI 组件**:
+- 搜索输入框：实时过滤
+- 导航按钮：↑ 上一个 / ↓ 下一个
+- 结果计数：`3 / 15` 格式显示
+
+**搜索逻辑**:
+```typescript
+// 搜索所有消息内容，返回匹配的消息索引
+const searchMatches = useMemo(() => {
+  if (!searchQuery.trim()) return []
+  const query = searchQuery.toLowerCase()
+  const matches: number[] = []
+  messages.forEach((msg, index) => {
+    const hasMatch = msg.blocks.some(block => {
+      const content = block.content?.toLowerCase() || ''
+      return content.includes(query)
+    })
+    if (hasMatch) matches.push(index)
+  })
+  return matches
+}, [messages, searchQuery])
+```
+
+**高亮显示**:
+```typescript
+function highlightText(text: string, query: string): React.ReactNode {
+  if (!query) return text
+  const parts = text.split(new RegExp(`(${escapeRegExp(query)})`, 'gi'))
+  return parts.map((part, i) =>
+    part.toLowerCase() === query.toLowerCase()
+      ? <mark key={i}>{part}</mark>
+      : part
+  )
+}
+```
+
+**MiniMap 搜索标记**:
+- 位置：MiniMap 右侧扩展区域 (`left: 100%`)
+- 样式：橙色横条，当前结果更亮更大
+- 交互：点击标记可跳转到对应位置
+
+### 5.6 System 消息显示
+
+**消息结构**:
+```typescript
+interface SystemMessage {
+  type: 'system'
+  subtype?: 'compact_boundary' | 'stop_hook_summary' | string
+  content?: string
+  // compact_boundary 特有
+  compactMetadata?: {
+    compactedMessageCount: number
+    conversationTokens: number
+    // ...
+  }
+  // stop_hook_summary 特有
+  stopReason?: string
+  hookCount?: number
+  hookInfos?: Array<{ hookName: string; status: string }>
+  hookErrors?: string[]
+  preventedContinuation?: boolean
+  hasOutput?: boolean
+}
+```
+
+**解析逻辑**:
+```typescript
+if (msgType === 'system') {
+  const subtype = obj.subtype || ''
+  const content = obj.content || ''
+  let displayContent = ''
+  let jsonDetails = null
+
+  if (subtype === 'compact_boundary') {
+    displayContent = '[Compact Boundary] ' + content
+    if (obj.compactMetadata) {
+      jsonDetails = { subtype, compactMetadata: obj.compactMetadata }
+    }
+  } else if (subtype === 'stop_hook_summary') {
+    displayContent = '[Hook] ' + (obj.stopReason || content || 'hook executed')
+    jsonDetails = {
+      subtype,
+      hookCount: obj.hookCount,
+      hookInfos: obj.hookInfos,
+      hookErrors: obj.hookErrors,
+      preventedContinuation: obj.preventedContinuation,
+      stopReason: obj.stopReason,
+      hasOutput: obj.hasOutput
+    }
+  }
+
+  blocks.push({ type: 'text', content: displayContent })
+  if (jsonDetails) blocks.push({ type: 'json', content: JSON.stringify(jsonDetails, null, 2) })
+}
+```
+
+**SystemDisplay 组件**:
+- 默认折叠，显示 `⚙ System`
+- 点击展开显示文本内容和 JSON 详情
+- JSON 详情以 `<pre>` 标签显示
+
+### 5.7 虚拟滚动
+
+**实现**: 使用 `@tanstack/react-virtual`
+
+```typescript
+const rowVirtualizer = useVirtualizer({
+  count: messages.length,
+  getScrollElement: () => containerRef.current,
+  estimateSize: () => 200,          // 预估高度
+  overscan: 5,                       // 预渲染行数
+  measureElement: (element) => element.getBoundingClientRect().height
+})
+```
+
+**MiniMap 可视区域计算**:
+```typescript
+const visibleStart = scrollTop / (scrollHeight || 1)
+const visibleEnd = (scrollTop + clientHeight) / (scrollHeight || 1)
+```
+
+### 5.8 IndexedDB 缓存
+
+**数据库结构**:
+```typescript
+// 数据库名: roam-messages
+// 表: messages
+interface CachedMessage {
+  sessionId: string              // 主键前缀
+  index: number                  // 消息索引
+  data: ParsedMessage            // 解析后的消息
+}
+
+// 表: session-meta
+interface SessionMeta {
+  sessionId: string              // 主键
+  version: number                // 缓存版本
+  totalMessages: number          // 总消息数
+  parsedAt: string               // 解析时间
+}
+```
+
+**缓存策略**:
+- 按 session ID 存储解析后的消息
+- 重新打开时直接从 IndexedDB 读取
+- 支持清除缓存并强制重新解析
+
+**刷新缓存**:
+```typescript
+const handleRefreshCache = useCallback(async () => {
+  await clearSession(session.id)      // 清除 IndexedDB
+  cacheRef.current?.clear()           // 清除内存缓存
+  setRefreshKey(k => k + 1)           // 触发重新解析
+}, [session.id])
+```
 
 ---
 
@@ -894,19 +1088,154 @@ cli/dist/
 
 ---
 
-## 11. 后续优化
+## 11. Preview 功能架构
 
-### 11.1 已完成
+### 11.1 组件关系
+
+```
+PreviewApp.tsx
+├── RoamPreviewCore (核心渲染组件)
+│   ├── Web Worker (JSONL 解析)
+│   ├── Virtual List (虚拟滚动)
+│   ├── MiniMap (小地图)
+│   └── Search (搜索功能)
+└── Session Selector (多 session 选择)
+```
+
+### 11.2 消息类型
+
+| type | 说明 | 显示组件 |
+|------|------|----------|
+| user | 用户消息 | UserDisplay |
+| assistant | 助手消息 | AssistantDisplay |
+| system | 系统消息（compact_boundary, stop_hook_summary 等） | SystemDisplay |
+| summary | 会话摘要 | SummaryDisplay |
+| result | 工具执行结果 | ResultDisplay |
+
+### 11.3 Block 类型
+
+```typescript
+interface Block {
+  type: 'text' | 'thinking' | 'tool_use' | 'tool_result' | 'json' | 'code'
+  content?: string
+  toolName?: string
+  toolInput?: string
+  language?: string
+}
+```
+
+### 11.4 Web Worker 解析流程
+
+```typescript
+// Worker 接收 JSONL 数据
+worker.postMessage({ type: 'parse', data: jsonlContent })
+
+// 解析流程
+1. 按行分割 JSONL
+2. 解析每行 JSON
+3. 根据 message.type 确定消息类型
+4. 提取 content blocks
+5. 检测对话树边界（conversation_id 变化时插入 tree-separator）
+6. 返回 ParsedMessage[]
+
+// 特殊处理
+- system 消息：解析 subtype 和 content，提取 JSON 详情
+- summary 消息：提取 summary 字段
+- assistant 消息：合并连续的 content blocks
+```
+
+### 11.5 对话树分割
+
+**检测逻辑**:
+```typescript
+// 当 conversation_id 改变时，表示新的对话树开始
+if (conversationId && conversationId !== lastConversationId) {
+  treeCount++
+  results.push({
+    displayType: 'tree-separator',
+    treeIndex: treeCount,
+    blocks: []
+  })
+  lastConversationId = conversationId
+}
+```
+
+**显示效果**:
+- 在 MiniMap 上显示对话树编号
+- 左侧标尺可点击跳转到对应对话树
+- 消息列表中显示分隔线
+
+### 11.6 搜索与高亮
+
+**搜索范围**:
+- 用户消息文本
+- 助手消息文本
+- 工具调用名称和输入
+- 系统消息内容
+
+**高亮实现**:
+```typescript
+function highlightText(text: string, query: string): React.ReactNode {
+  if (!query) return text
+  const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const parts = text.split(new RegExp(`(${escaped})`, 'gi'))
+  return parts.map((part, i) =>
+    part.toLowerCase() === query.toLowerCase()
+      ? <mark key={i}>{part}</mark>
+      : part
+  )
+}
+```
+
+### 11.7 MiniMap 搜索标记样式
+
+```css
+/* 扩展到 MiniMap 右侧 */
+.minimap-search-markers {
+  position: absolute;
+  top: 20px;
+  left: 100%;        /* 从右边缘开始 */
+  width: 20px;
+  bottom: 20px;
+  pointer-events: none;
+}
+
+.minimap-search-marker {
+  position: absolute;
+  left: 4px;
+  width: 12px;
+  height: 2px;
+  background: #f59e0b;  /* 橙色 */
+  opacity: 0.9;
+}
+
+.minimap-search-marker.current {
+  width: 18px;
+  height: 4px;
+  opacity: 1;
+  box-shadow: 0 0 6px #f59e0b;  /* 发光效果 */
+}
+```
+
+---
+
+## 12. 后续优化
+
+### 12.1 已完成
 - [x] 认证机制（GitHub OAuth）
 - [x] 导出/导入功能
 - [x] 本地预览功能
 - [x] 跨平台构建
+- [x] Web UI MiniMap 组件
+- [x] 搜索功能与高亮显示
+- [x] System 消息内容解析和显示
+- [x] IndexedDB 缓存与刷新机制
 
-### 11.2 计划中
+### 12.2 计划中
 - [ ] 会话压缩存储
 - [ ] 移动端 Web 适配
 
-### 11.3 考虑中
+### 12.3 考虑中
 - [ ] 会话分享（公开链接）
 - [ ] 会话标签/分组
 - [ ] 自动摘要生成
