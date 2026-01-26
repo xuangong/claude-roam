@@ -889,20 +889,51 @@ function SessionDetailView({
     }
   }, [searchQuery, totalMessages, virtualizer])
 
+  // Ref to track ongoing search scroll target
+  const searchScrollTargetRef = useRef<number | null>(null)
+
+  // Scroll to search result with retry logic for virtual scrolling
+  const scrollToSearchResult = useCallback((messageIndex: number) => {
+    searchScrollTargetRef.current = messageIndex
+
+    const scrollToTarget = () => {
+      if (searchScrollTargetRef.current !== messageIndex) return
+      if (!parentRef.current) return
+
+      virtualizer.scrollToIndex(messageIndex, { align: 'center' })
+
+      // Check if we need to keep adjusting
+      const range = virtualizer.range
+      if (range) {
+        const isInView = messageIndex >= range.startIndex && messageIndex <= range.endIndex
+        if (!isInView) {
+          requestAnimationFrame(scrollToTarget)
+        }
+      }
+    }
+
+    scrollToTarget()
+
+    // Prefetch messages around target
+    if (cacheRef.current) {
+      cacheRef.current.prefetch(messageIndex, totalMessages)
+    }
+  }, [virtualizer, totalMessages])
+
   // Search navigation functions
   const handleSearchNext = useCallback(() => {
     if (searchResults.length === 0) return
     const newIndex = currentSearchIndex >= searchResults.length - 1 ? 0 : currentSearchIndex + 1
     setCurrentSearchIndex(newIndex)
-    virtualizer.scrollToIndex(searchResults[newIndex], { align: 'center' })
-  }, [searchResults, currentSearchIndex, virtualizer])
+    scrollToSearchResult(searchResults[newIndex])
+  }, [searchResults, currentSearchIndex, scrollToSearchResult])
 
   const handleSearchPrev = useCallback(() => {
     if (searchResults.length === 0) return
     const newIndex = currentSearchIndex <= 0 ? searchResults.length - 1 : currentSearchIndex - 1
     setCurrentSearchIndex(newIndex)
-    virtualizer.scrollToIndex(searchResults[newIndex], { align: 'center' })
-  }, [searchResults, currentSearchIndex, virtualizer])
+    scrollToSearchResult(searchResults[newIndex])
+  }, [searchResults, currentSearchIndex, scrollToSearchResult])
 
   const handleSearchClose = useCallback(() => {
     setShowSearch(false)
@@ -914,8 +945,8 @@ function SessionDetailView({
   // Handle click on search result marker in minimap
   const handleSearchResultClick = useCallback((searchIndex: number) => {
     setCurrentSearchIndex(searchIndex)
-    virtualizer.scrollToIndex(searchResults[searchIndex], { align: 'center' })
-  }, [searchResults, virtualizer])
+    scrollToSearchResult(searchResults[searchIndex])
+  }, [searchResults, scrollToSearchResult])
 
   // Load visible messages from IndexedDB
   useEffect(() => {
