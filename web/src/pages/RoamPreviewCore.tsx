@@ -1187,20 +1187,12 @@ function SessionDetailView({
         />
       )}
 
-      <div className="section conversation-section">
+      <div className="section conversation-section conversation-section-immersive">
         <h2>Conversation</h2>
         <div className="conversation-container">
           <div
             className="conversation-flow virtual-scroll-container"
             ref={parentRef}
-            style={{
-              height: 'calc(100vh - 200px)',
-              overflow: 'auto',
-              contain: 'strict',
-              scrollbarWidth: 'none',  // Firefox
-              msOverflowStyle: 'none', // IE/Edge
-              scrollBehavior: 'auto',  // Disable smooth scrolling
-            }}
           >
             {totalMessages === 0 ? (
               <div className="empty-conversation">No conversation data to display</div>

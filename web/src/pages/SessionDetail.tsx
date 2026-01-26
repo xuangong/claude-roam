@@ -5,426 +5,64 @@ import { getSessionDetail, pullSession, type SessionDetailResponse, type Segment
 import { MiniMap, type MiniMapItem } from '../components/MiniMap'
 import { MessageRow } from '../components/MessageComponents'
 import { FloatingSearch } from '../components/FloatingSearch'
-import type { DisplayMessage, ContentBlock, RawMessage, ToolUseInfo } from '../types/message'
+import type { DisplayMessage } from '../types/message'
 import { formatDateTime } from '../utils/format'
+import {
+  getSessionMeta,
+  clearSession,
+  MessageCache
+} from '../utils/messageStore'
+import { createParserWorker } from '../utils/parserWorker'
 
-// Build conversation tree and extract all conversation chains
-function buildConversationTree(data: string): RawMessage[] {
-  const lines = data.split('\n').filter(line => line.trim())
-  const messageMap = new Map<string, RawMessage>()
-  const summaries: RawMessage[] = []
-  const childrenMap = new Map<string, string[]>()
-
-  // Map from file-history-snapshot messageId to its inner snapshot.messageId
-  // This is used to repair broken chains where parentUuid points to a snapshot
-  const snapshotIdMap = new Map<string, string>()
-
-  // First pass: parse all lines, collect snapshots and messages
-  const parsedLines: Array<{ type: string; obj: Record<string, unknown> }> = []
-  for (const line of lines) {
-    try {
-      const obj = JSON.parse(line) as Record<string, unknown>
-      const type = obj.type as string
-
-      // Collect file-history-snapshot mappings
-      if (type === 'file-history-snapshot') {
-        const messageId = obj.messageId as string
-        const snapshot = obj.snapshot as { messageId?: string } | undefined
-        if (messageId && snapshot?.messageId) {
-          snapshotIdMap.set(messageId, snapshot.messageId)
-        }
-      }
-
-      parsedLines.push({ type, obj })
-    } catch {
-      // Skip invalid lines
-    }
+// Estimate message height based on type char (from typeString)
+function estimateHeightByType(typeChar: string): number {
+  switch (typeChar) {
+    case 'h': return 80   // human
+    case 'a': return 150  // assistant
+    case 'c': return 50   // tool_call
+    case 'r': return 80   // tool_result
+    case 's': return 40   // tree-separator
+    case 'y': return 40   // system
+    default: return 60
   }
-
-  // Second pass: build message map with repaired parentUuid
-  for (const { type, obj } of parsedLines) {
-    if (type === 'summary') {
-      summaries.push(obj as unknown as RawMessage)
-      continue
-    }
-
-    const uuid = obj.uuid as string | undefined
-    if (uuid) {
-      // Repair parentUuid if it points to a snapshot
-      let parentUuid = obj.parentUuid as string | null | undefined
-      if (parentUuid && snapshotIdMap.has(parentUuid)) {
-        // Replace snapshot messageId with its inner messageId
-        parentUuid = snapshotIdMap.get(parentUuid)!
-        obj.parentUuid = parentUuid
-      }
-
-      messageMap.set(uuid, obj as unknown as RawMessage)
-
-      // Track parent-child relationships
-      const parentId = parentUuid || 'ROOT'
-      if (!childrenMap.has(parentId)) {
-        childrenMap.set(parentId, [])
-      }
-      childrenMap.get(parentId)!.push(uuid)
-    }
-  }
-
-  // Helper: find root of a message (or the earliest reachable ancestor if chain is broken)
-  const getRoot = (uuid: string): string | null => {
-    let current = uuid
-    let lastValid: string | null = null
-    while (current && messageMap.has(current)) {
-      lastValid = current
-      const msg = messageMap.get(current)!
-      if (!msg.parentUuid) return current
-      // Check if parent exists in map - if not, this is effectively a root
-      if (!messageMap.has(msg.parentUuid)) {
-        return current
-      }
-      current = msg.parentUuid
-    }
-    return lastValid
-  }
-
-  // Helper: build chain from root to leaf
-  const buildChain = (leafUuid: string): RawMessage[] => {
-    const chain: RawMessage[] = []
-    let current: string | null = leafUuid
-    while (current) {
-      const msg = messageMap.get(current)
-      if (msg) {
-        chain.unshift(msg)
-        current = msg.parentUuid || null
-      } else {
-        break
-      }
-    }
-    return chain
-  }
-
-  // Find all root nodes (messages with no parent)
-  const rootUuids = childrenMap.get('ROOT') || []
-
-  if (rootUuids.length === 0) {
-    if (summaries.length > 0) {
-      return summaries
-    }
-    return Array.from(messageMap.values())
-  }
-
-  // Find all leaf nodes (nodes with no children)
-  const allUuids = new Set(messageMap.keys())
-  const parentUuids = new Set<string>()
-  for (const msg of messageMap.values()) {
-    if (msg.parentUuid) {
-      parentUuids.add(msg.parentUuid)
-    }
-  }
-  const leafUuids = new Set<string>()
-  for (const uuid of allUuids) {
-    if (!parentUuids.has(uuid)) {
-      leafUuids.add(uuid)
-    }
-  }
-
-  // Group leaves by their root
-  const leavesByRoot = new Map<string, string[]>()
-  for (const leaf of leafUuids) {
-    const root = getRoot(leaf)
-    if (root) {
-      if (!leavesByRoot.has(root)) {
-        leavesByRoot.set(root, [])
-      }
-      leavesByRoot.get(root)!.push(leaf)
-    }
-  }
-
-  // Group summaries by the root of their leafUuid
-  const summariesByRoot = new Map<string, RawMessage[]>()
-  const orphanedSummaries: RawMessage[] = []
-  for (const summary of summaries) {
-    if (summary.leafUuid) {
-      const root = getRoot(summary.leafUuid)
-      if (root) {
-        if (!summariesByRoot.has(root)) {
-          summariesByRoot.set(root, [])
-        }
-        summariesByRoot.get(root)!.push(summary)
-      } else {
-        orphanedSummaries.push(summary)
-      }
-    } else {
-      orphanedSummaries.push(summary)
-    }
-  }
-
-  // Collect all effective roots: both true roots (no parent) AND broken chain roots
-  // (messages whose parent doesn't exist in the map)
-  const allEffectiveRoots = new Set<string>(rootUuids)
-  for (const root of leavesByRoot.keys()) {
-    if (!allEffectiveRoots.has(root)) {
-      allEffectiveRoots.add(root)
-    }
-  }
-
-  // Sort roots by the timestamp of their most recent leaf
-  const rootsWithLatestTime: [string, string][] = []
-  for (const root of allEffectiveRoots) {
-    const leaves = leavesByRoot.get(root) || []
-    let latestTime = ''
-    for (const leaf of leaves) {
-      const msg = messageMap.get(leaf)
-      if (msg?.timestamp && msg.timestamp > latestTime) {
-        latestTime = msg.timestamp
-      }
-    }
-    rootsWithLatestTime.push([root, latestTime])
-  }
-  rootsWithLatestTime.sort((a, b) => a[1].localeCompare(b[1]))
-
-  // Build result
-  const result: RawMessage[] = []
-  const processedChainUuids = new Set<string>()
-  let treeIndex = 0
-
-  // First, add orphaned summaries
-  if (orphanedSummaries.length > 0) {
-    treeIndex++
-    const separator: RawMessage = {
-      type: 'tree-separator',
-      treeIndex,
-      treeSummaryCount: orphanedSummaries.length,
-      treeMessageCount: 0,
-      timestamp: ''
-    }
-    result.push(separator)
-    for (const summary of orphanedSummaries) {
-      result.push(summary)
-    }
-  }
-
-  for (const [root] of rootsWithLatestTime) {
-    const leaves = leavesByRoot.get(root) || []
-    const treeSummaries = summariesByRoot.get(root) || []
-
-    // Find the most recent leaf in this tree
-    let currentLeaf: string | null = null
-    let latestTimestamp = ''
-    for (const leaf of leaves) {
-      const msg = messageMap.get(leaf)
-      if (msg?.timestamp && msg.timestamp > latestTimestamp) {
-        latestTimestamp = msg.timestamp
-        currentLeaf = leaf
-      }
-    }
-
-    if (!currentLeaf) continue
-
-    // Build the main chain
-    const chain = buildChain(currentLeaf)
-    const chainUuids = new Set(chain.map(m => m.uuid).filter(Boolean) as string[])
-
-    // Count summaries not in main chain
-    const branchSummaries = treeSummaries.filter(s => s.leafUuid && !chainUuids.has(s.leafUuid))
-
-    // Add tree separator
-    treeIndex++
-    if (treeIndex > 1 || branchSummaries.length > 0 || rootsWithLatestTime.length > 1) {
-      const separator: RawMessage = {
-        type: 'tree-separator',
-        treeIndex,
-        treeSummaryCount: branchSummaries.length,
-        treeMessageCount: chain.length,
-        timestamp: latestTimestamp
-      }
-      result.push(separator)
-    }
-
-    // Add summaries for branches NOT in the main chain
-    for (const summary of branchSummaries) {
-      result.push(summary)
-    }
-
-    // Add the main chain
-    for (const msg of chain) {
-      if (msg.uuid && !processedChainUuids.has(msg.uuid)) {
-        processedChainUuids.add(msg.uuid)
-        result.push(msg)
-      }
-    }
-  }
-
-  return result
 }
 
-function parseMessages(data: string): DisplayMessage[] {
-  const messages: DisplayMessage[] = []
-
-  // Use tree building to get the correct conversation chain
-  const rawMessages = buildConversationTree(data)
-
-  // Track tool_use IDs to their names for linking with results
-  const toolUseMap = new Map<string, ToolUseInfo>()
-
-  for (const obj of rawMessages) {
-    const topType = obj.type as string
-
-    // Skip internal types
-    if (topType === 'file-history-snapshot' || topType === 'queue-operation') {
-      continue
-    }
-
-    // Handle tree-separator
-    if (topType === 'tree-separator') {
-      messages.push({
-        displayType: 'tree-separator',
-        blocks: [],
-        treeIndex: obj.treeIndex,
-        treeSummaryCount: obj.treeSummaryCount,
-        treeTimestamp: obj.timestamp
-      })
-      continue
-    }
-
-    // Handle system messages (hooks, etc.)
-    if (topType === 'system') {
-      const subtype = obj.subtype as string || ''
-      const content = obj.content as string || ''
-      let displayContent = ''
-
-      if (subtype === 'compact_boundary') {
-        displayContent = '[Compact Boundary] ' + content
-      } else if (subtype === 'stop_hook_summary') {
-        displayContent = '[Hook] ' + ((obj.stopReason as string) || content || 'hook executed')
-      } else if (content) {
-        displayContent = content
-      }
-
-      messages.push({
-        displayType: 'system',
-        blocks: displayContent ? [{ type: 'text', content: displayContent }] : [],
-        raw: obj as unknown as Record<string, unknown>
-      })
-      continue
-    }
-
-    // Handle summary
-    if (topType === 'summary') {
-      messages.push({
-        displayType: 'system',
-        blocks: [{ type: 'text', content: `[Compacted] ${obj.summary || ''}` }],
-        raw: obj as unknown as Record<string, unknown>
-      })
-      continue
-    }
-
-    // Handle user/assistant messages
-    if ((topType === 'user' || topType === 'assistant') && obj.message) {
-      const msg = obj.message
-      const content = msg.content
-
-      // Parse content blocks
-      const textBlocks: ContentBlock[] = []
-      const toolUseBlocks: ContentBlock[] = []
-      const toolResultBlocks: ContentBlock[] = []
-
-      if (typeof content === 'string') {
-        if (content.trim()) {
-          textBlocks.push({ type: 'text', content })
-        }
-      } else if (Array.isArray(content)) {
-        for (const item of content) {
-          if (item.type === 'text' && item.text) {
-            textBlocks.push({ type: 'text', content: item.text })
-          } else if (item.type === 'tool_use') {
-            const toolId = item.id || ''
-            const toolName = item.name || 'unknown_tool'
-            // Store for linking with results
-            toolUseMap.set(toolId, { id: toolId, name: toolName })
-            toolUseBlocks.push({
-              type: 'tool_use',
-              id: toolId,
-              name: toolName,
-              input: item.input || {}
-            })
-          } else if (item.type === 'tool_result') {
-            let resultContent = ''
-            if (typeof item.content === 'string') {
-              resultContent = item.content
-            } else if (Array.isArray(item.content)) {
-              resultContent = item.content
-                .map((c: { type?: string; text?: string }) => c.text || '')
-                .join('\n')
-            } else if (item.content) {
-              resultContent = JSON.stringify(item.content, null, 2)
-            }
-            toolResultBlocks.push({
-              type: 'tool_result',
-              tool_use_id: item.tool_use_id || '',
-              content: resultContent,
-              is_error: item.is_error
-            })
-          }
-        }
-      }
-
-      // Create display messages based on content types
-      // User + text = Human
-      if (topType === 'user' && textBlocks.length > 0) {
-        messages.push({
-          displayType: 'human',
-          blocks: textBlocks
-        })
-      }
-
-      // User + tool_result = Tool Result (with linked tool name)
-      if (topType === 'user' && toolResultBlocks.length > 0) {
-        for (const block of toolResultBlocks) {
-          if (block.type === 'tool_result') {
-            const toolInfo = toolUseMap.get(block.tool_use_id)
-            messages.push({
-              displayType: 'tool_result',
-              blocks: [block],
-              toolName: toolInfo?.name || 'unknown',
-              toolId: block.tool_use_id
-            })
-          }
-        }
-      }
-
-      // Assistant + text = Assistant
-      if (topType === 'assistant' && textBlocks.length > 0) {
-        messages.push({
-          displayType: 'assistant',
-          blocks: textBlocks
-        })
-      }
-
-      // Assistant + tool_use = Tool Call
-      if (topType === 'assistant' && toolUseBlocks.length > 0) {
-        for (const block of toolUseBlocks) {
-          if (block.type === 'tool_use') {
-            messages.push({
-              displayType: 'tool_call',
-              blocks: [block],
-              toolName: block.name,
-              toolId: block.id
-            })
-          }
-        }
-      }
-    }
+// Estimate message height from actual message content
+function estimateMessageHeight(msg: DisplayMessage | null, typeChar?: string): number {
+  if (!msg) {
+    return typeChar ? estimateHeightByType(typeChar) : 60
   }
-
-  return messages
+  switch (msg.displayType) {
+    case 'human': {
+      const textLen = msg.blocks.reduce((acc, b) => acc + (b.type === 'text' ? b.content.length : 0), 0)
+      return Math.max(60, Math.min(400, 60 + Math.floor(textLen / 80) * 20))
+    }
+    case 'assistant': {
+      const textLen = msg.blocks.reduce((acc, b) => acc + (b.type === 'text' ? b.content.length : 0), 0)
+      return Math.max(60, Math.min(600, 60 + Math.floor(textLen / 80) * 20))
+    }
+    case 'tool_call': return 50
+    case 'tool_result': return 80
+    case 'tree-separator': return 40
+    case 'system': return 40
+    default: return 60
+  }
 }
 
 function SessionDetail() {
   const { id } = useParams<{ id: string }>()
   const [detail, setDetail] = useState<SessionDetailResponse | null>(null)
-  const [messages, setMessages] = useState<DisplayMessage[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+
+  // Web Worker parsing state
+  const [isParsingData, setIsParsingData] = useState(false)
+  const [parsingProgress, setParsingProgress] = useState('')
+  const [totalMessages, setTotalMessages] = useState(0)
+  const [typeString, setTypeString] = useState('')  // For minimap colors
+  const [visibleMessages, setVisibleMessages] = useState<Map<number, DisplayMessage>>(new Map())
+  const cacheRef = useRef<MessageCache | null>(null)
+  const [refreshKey, setRefreshKey] = useState(0)  // For forcing re-parse
 
   // Virtual scroll state
   const parentRef = useRef<HTMLDivElement>(null)
@@ -433,6 +71,7 @@ function SessionDetail() {
 
   // Search state
   const [searchQuery, setSearchQuery] = useState('')
+  const [searchResults, setSearchResults] = useState<number[]>([])
   const [currentSearchIndex, setCurrentSearchIndex] = useState(-1)
   const [showSearch, setShowSearch] = useState(false)
 
@@ -450,66 +89,149 @@ function SessionDetail() {
 
   // Virtual list setup
   const virtualizer = useVirtualizer({
-    count: messages.length,
+    count: totalMessages,
     getScrollElement: () => parentRef.current,
-    estimateSize: useCallback((index: number) => {
-      const msg = messages[index]
-      if (!msg) return 80
-      switch (msg.displayType) {
-        case 'tree-separator': return 40
-        case 'human': return 100
-        case 'assistant': return 150
-        case 'tool_call': return 60
-        case 'tool_result': return 80
-        case 'system': return 50
-        default: return 80
-      }
-    }, [messages]),
-    overscan: 10,
+    estimateSize: (index) => estimateMessageHeight(visibleMessages.get(index) || null, typeString[index]),
+    overscan: 20,
   })
 
   // Update visible range for minimap
   useEffect(() => {
     const range = virtualizer.range
-    if (range && messages.length > 0) {
-      setVisibleStart(range.startIndex / messages.length)
-      setVisibleEnd(Math.min(1, (range.endIndex + 1) / messages.length))
+    if (range && totalMessages > 0) {
+      setVisibleStart(range.startIndex / totalMessages)
+      setVisibleEnd(Math.min(1, (range.endIndex + 1) / totalMessages))
     }
-  }, [virtualizer.range, messages.length])
+  }, [virtualizer.range, totalMessages])
 
-  // Build minimap items from messages
-  const minimapItems = useMemo<MiniMapItem[]>(() => {
-    if (messages.length === 0) return []
+  // Track last loaded range to avoid unnecessary updates
+  const lastLoadedRangeRef = useRef<{ start: number; end: number } | null>(null)
 
-    return messages.map((msg, i) => {
-      const item: MiniMapItem = {
-        type: msg.displayType,
-        index: i,
-        heightRatio: 1 / messages.length  // Equal height for simplicity
+  // Load visible messages from IndexedDB
+  useEffect(() => {
+    if (isParsingData || totalMessages === 0 || !cacheRef.current) return
+
+    const range = virtualizer.range
+    if (!range) return
+
+    const start = Math.max(0, range.startIndex - 50)
+    const end = Math.min(totalMessages - 1, range.endIndex + 50)
+
+    // Skip if we've already loaded this range
+    const lastRange = lastLoadedRangeRef.current
+    if (lastRange && start >= lastRange.start && end <= lastRange.end) {
+      return
+    }
+
+    // Prefetch and update visible messages
+    cacheRef.current.prefetch(Math.floor((start + end) / 2), totalMessages).then(() => {
+      const newVisible = new Map<number, DisplayMessage>()
+      for (let i = start; i <= end; i++) {
+        const msg = cacheRef.current?.getIfCached(i)
+        if (msg) newVisible.set(i, msg)
       }
-      if (msg.displayType === 'tree-separator' && msg.treeIndex) {
-        item.treeIndex = msg.treeIndex
-      }
-      return item
+      lastLoadedRangeRef.current = { start, end }
+      setVisibleMessages(newVisible)
     })
-  }, [messages])
+  }, [virtualizer.range, isParsingData, totalMessages])
 
-  // Search results - message indices with matches
-  const searchResults = useMemo(() => {
-    if (!searchQuery.trim()) return []
+  // Build minimap items - merge adjacent same-type messages
+  const minimapItems = useMemo<MiniMapItem[]>(() => {
+    if (totalMessages === 0 || !typeString) return []
+
+    const charToType: Record<string, string> = {
+      'h': 'human',
+      'a': 'assistant',
+      'c': 'tool_call',
+      'r': 'tool_result',
+      's': 'tree-separator',
+      'y': 'system'
+    }
+
+    const items: MiniMapItem[] = []
+    let treeIdx = 0
+    let currentType: string | null = null
+    let currentStart = 0
+    let currentCount = 0
+
+    const pushCurrentBlock = () => {
+      if (currentType && currentCount > 0) {
+        items.push({
+          type: currentType,
+          index: currentStart,
+          heightRatio: currentCount / totalMessages,
+          treeIndex: currentType === 'tree-separator' ? treeIdx : undefined
+        })
+      }
+    }
+
+    for (let i = 0; i < totalMessages; i++) {
+      const typeChar = typeString[i] || 'a'
+      const displayType = charToType[typeChar] || 'assistant'
+
+      if (displayType === 'tree-separator') {
+        pushCurrentBlock()
+        treeIdx++
+        items.push({
+          type: 'tree-separator',
+          index: i,
+          heightRatio: 1 / totalMessages,
+          treeIndex: treeIdx
+        })
+        currentType = null
+        currentCount = 0
+      } else if (displayType === currentType) {
+        currentCount++
+      } else {
+        pushCurrentBlock()
+        currentType = displayType
+        currentStart = i
+        currentCount = 1
+      }
+    }
+    pushCurrentBlock()
+
+    return items
+  }, [totalMessages, typeString])
+
+  // Search effect - search through all cached messages when query changes
+  useEffect(() => {
+    if (!searchQuery.trim() || !cacheRef.current || totalMessages === 0) {
+      setSearchResults([])
+      setCurrentSearchIndex(-1)
+      return
+    }
+
     const query = searchQuery.toLowerCase()
     const results: number[] = []
-    messages.forEach((msg, index) => {
-      const hasMatch = msg.blocks.some(block => {
-        if (block.type === 'text' && block.content.toLowerCase().includes(query)) return true
-        if (block.type === 'tool_use' && block.name.toLowerCase().includes(query)) return true
-        if (block.type === 'tool_result' && block.content.toLowerCase().includes(query)) return true
-        return false
-      })
-      if (hasMatch) results.push(index)
-    })
-    return results
-  }, [messages, searchQuery])
+
+    // Search through all cached messages
+    for (let i = 0; i < totalMessages; i++) {
+      const msg = cacheRef.current.getIfCached(i)
+      if (msg) {
+        for (const block of msg.blocks) {
+          if (block.type === 'text' && block.content.toLowerCase().includes(query)) {
+            results.push(i)
+            break
+          } else if (block.type === 'tool_use' && block.name.toLowerCase().includes(query)) {
+            results.push(i)
+            break
+          } else if (block.type === 'tool_result' && block.content.toLowerCase().includes(query)) {
+            results.push(i)
+            break
+          }
+        }
+      }
+    }
+
+    setSearchResults(results)
+    if (results.length > 0) {
+      setCurrentSearchIndex(0)
+      virtualizer.scrollToIndex(results[0], { align: 'center' })
+    } else {
+      setCurrentSearchIndex(-1)
+    }
+  }, [searchQuery, totalMessages, virtualizer])
 
   // Ref to track ongoing search scroll target
   const searchScrollTargetRef = useRef<number | null>(null)
@@ -524,7 +246,6 @@ function SessionDetail() {
 
       virtualizer.scrollToIndex(messageIndex, { align: 'center' })
 
-      // Check if we need to keep adjusting
       const range = virtualizer.range
       if (range) {
         const isInView = messageIndex >= range.startIndex && messageIndex <= range.endIndex
@@ -535,7 +256,12 @@ function SessionDetail() {
     }
 
     scrollToTarget()
-  }, [virtualizer])
+
+    // Prefetch messages around target
+    if (cacheRef.current) {
+      cacheRef.current.prefetch(messageIndex, totalMessages)
+    }
+  }, [virtualizer, totalMessages])
 
   // Navigate search results
   const goToNextResult = useCallback(() => {
@@ -555,6 +281,7 @@ function SessionDetail() {
   const handleSearchClose = useCallback(() => {
     setShowSearch(false)
     setSearchQuery('')
+    setSearchResults([])
     setCurrentSearchIndex(-1)
   }, [])
 
@@ -564,50 +291,179 @@ function SessionDetail() {
     scrollToSearchResult(searchResults[searchIndex])
   }, [searchResults, scrollToSearchResult])
 
-  // Reset search index when query changes
-  useEffect(() => {
-    if (searchResults.length > 0) {
-      setCurrentSearchIndex(0)
-      scrollToSearchResult(searchResults[0])
-    } else {
-      setCurrentSearchIndex(-1)
-    }
-  }, [searchQuery, searchResults, scrollToSearchResult])
+  // Ref to track ongoing scroll target
+  const scrollTargetRef = useRef<number | null>(null)
 
   // Navigate via minimap
   const handleMinimapNavigate = useCallback((ratio: number) => {
-    const targetIndex = Math.floor(ratio * messages.length)
-    virtualizer.scrollToIndex(targetIndex, { align: 'start' })
-  }, [messages.length, virtualizer])
+    if (!parentRef.current || totalMessages === 0) return
 
-  useEffect(() => {
-    if (!id) return
+    const targetIndex = Math.floor(ratio * totalMessages)
+    scrollTargetRef.current = ratio
 
-    async function fetchData() {
-      try {
-        setLoading(true)
-        setError(null)
-        const [detailResp, pullResp] = await Promise.all([
-          getSessionDetail(id!),
-          pullSession(id!)
-        ])
-        setDetail(detailResp)
-        setMessages(parseMessages(pullResp.data))
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to load session')
-      } finally {
-        setLoading(false)
+    const scrollToTarget = () => {
+      if (scrollTargetRef.current !== ratio) return
+      if (!parentRef.current) return
+
+      virtualizer.scrollToIndex(targetIndex, { align: 'start' })
+
+      const range = virtualizer.range
+      if (range && Math.abs(range.startIndex - targetIndex) > 2) {
+        requestAnimationFrame(scrollToTarget)
       }
     }
 
-    fetchData()
+    scrollToTarget()
+
+    // Prefetch messages around target
+    if (cacheRef.current) {
+      cacheRef.current.prefetch(targetIndex, totalMessages)
+    }
+  }, [totalMessages, virtualizer])
+
+  // Clear cache and refresh
+  const handleRefreshCache = useCallback(async () => {
+    if (!id) return
+    await clearSession(id)
+    cacheRef.current?.clear()
+    setRefreshKey(k => k + 1)
   }, [id])
 
-  if (loading) {
+  // Fetch session data and parse with Web Worker
+  useEffect(() => {
+    if (!id) return
+
+    let cancelled = false
+    let worker: Worker | null = null
+
+    async function fetchAndParse(forceReparse = false) {
+      try {
+        setLoading(true)
+        setError(null)
+
+        // First, fetch session detail (lightweight request)
+        const detailResp = await getSessionDetail(id!)
+        if (cancelled) return
+        setDetail(detailResp)
+
+        const sessionId = id!
+        // Use updated_at as cache key - if session hasn't changed, skip download
+        const cacheKey = detailResp.session.updated_at
+
+        setIsParsingData(true)
+        setParsingProgress('Checking cache...')
+
+        // Check if already cached using updated_at
+        if (!forceReparse) {
+          const meta = await getSessionMeta(sessionId)
+          if (meta && !cancelled) {
+            const cachedKey = (meta as { dataHash?: string }).dataHash
+            const ts = (meta as { typeString?: string }).typeString || ''
+            // If cache key matches and typeString exists, use cache
+            if (cachedKey === cacheKey && ts.length > 0) {
+              setTotalMessages(meta.totalMessages)
+              setTypeString(ts)
+              cacheRef.current = new MessageCache(sessionId)
+              setParsingProgress('Loading messages...')
+              await cacheRef.current.prefetch(Math.floor(meta.totalMessages / 2), meta.totalMessages)
+              setIsParsingData(false)
+              setLoading(false)
+              return
+            }
+          }
+        }
+
+        // Cache miss or stale - need to download and parse
+        setParsingProgress('Downloading data...')
+        const pullResp = await pullSession(id!)
+        if (cancelled) return
+
+        // Parse with worker
+        setParsingProgress('Starting parser...')
+        worker = createParserWorker()
+
+        worker.onmessage = async (e) => {
+          if (cancelled) return
+
+          const { type, message, totalMessages: total, typeString: ts } = e.data
+          if (type === 'progress') {
+            setParsingProgress(message)
+          } else if (type === 'done') {
+            worker?.terminate()
+            worker = null
+            setTotalMessages(total)
+            setTypeString(ts || '')
+            cacheRef.current = new MessageCache(sessionId)
+            setParsingProgress('Loading messages...')
+            await cacheRef.current.prefetch(Math.floor(total / 2), total)
+            setIsParsingData(false)
+            setLoading(false)
+          } else if (type === 'error') {
+            worker?.terminate()
+            worker = null
+            setError(message)
+            setIsParsingData(false)
+            setLoading(false)
+          }
+        }
+
+        worker.onerror = (err) => {
+          worker?.terminate()
+          worker = null
+          setError('Worker error: ' + err.message)
+          setIsParsingData(false)
+          setLoading(false)
+        }
+
+        // Use updated_at as dataHash for cache validation
+        worker.postMessage({ data: pullResp.data, sessionId, dataHash: cacheKey })
+
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : 'Failed to load session')
+          setLoading(false)
+          setIsParsingData(false)
+        }
+      }
+    }
+
+    fetchAndParse(refreshKey > 0)
+
+    return () => {
+      cancelled = true
+      worker?.terminate()
+      cacheRef.current?.clear()
+    }
+  }, [id, refreshKey])
+
+  if (loading || isParsingData) {
     return (
       <div className="detail-page">
         <Link to="/" className="back-link">Back to sessions</Link>
-        <div className="loading">Loading session</div>
+        <div className="loading-container" style={{
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: '60px 20px',
+          color: 'var(--text-secondary)'
+        }}>
+          <div className="loading-spinner" style={{
+            width: '40px',
+            height: '40px',
+            border: '3px solid var(--border)',
+            borderTopColor: 'var(--accent)',
+            borderRadius: '50%',
+            animation: 'spin 1s linear infinite',
+            marginBottom: '16px'
+          }} />
+          <div style={{ fontSize: '14px' }}>{isParsingData ? parsingProgress : 'Loading session...'}</div>
+          <style>{`
+            @keyframes spin {
+              to { transform: rotate(360deg); }
+            }
+          `}</style>
+        </div>
       </div>
     )
   }
@@ -626,6 +482,7 @@ function SessionDetail() {
   }
 
   const virtualItems = virtualizer.getVirtualItems()
+  const totalSize = virtualizer.getTotalSize()
 
   return (
     <div className="detail-page">
@@ -635,7 +492,7 @@ function SessionDetail() {
         <h1>{detail.session.session_id}</h1>
         <div className="detail-meta">
           <span>{detail.session.total_lines} lines</span>
-          <span>{messages.length} messages</span>
+          <span>{totalMessages} messages</span>
           <span>Created: {formatDateTime(detail.session.created_at)}</span>
           <span>Updated: {formatDateTime(detail.session.updated_at)}</span>
           <button
@@ -652,6 +509,21 @@ function SessionDetail() {
             title="Search (Ctrl+F)"
           >
             🔍 Search
+          </button>
+          <button
+            onClick={handleRefreshCache}
+            style={{
+              padding: 'var(--space-1) var(--space-2)',
+              fontSize: '12px',
+              cursor: 'pointer',
+              background: 'var(--bg-tertiary)',
+              border: '1px solid var(--border-default)',
+              borderRadius: 'var(--radius-sm)',
+              color: 'var(--text-secondary)',
+            }}
+            title="Clear cache and re-parse messages"
+          >
+            ↻ Refresh
           </button>
         </div>
       </div>
@@ -694,28 +566,27 @@ function SessionDetail() {
         </table>
       </div>
 
-      <div className="section conversation-section">
+      <div className="section conversation-section conversation-section-immersive">
         <h2>Conversation</h2>
         <div className="conversation-container">
           <div
             className="conversation-flow virtual-scroll-container"
             ref={parentRef}
-            style={{ height: 'calc(100vh - 350px)', overflow: 'auto' }}
           >
-            {messages.length === 0 ? (
+            {totalMessages === 0 ? (
               <div className="empty-conversation">
                 No conversation data to display
               </div>
             ) : (
               <div
                 style={{
-                  height: `${virtualizer.getTotalSize()}px`,
+                  height: `${totalSize}px`,
                   width: '100%',
                   position: 'relative',
                 }}
               >
                 {virtualItems.map((virtualRow) => {
-                  const msg = messages[virtualRow.index]
+                  const msg = visibleMessages.get(virtualRow.index) || null
                   return (
                     <div
                       key={virtualRow.key}
@@ -740,13 +611,13 @@ function SessionDetail() {
               </div>
             )}
           </div>
-          {messages.length > 0 && (
+          {totalMessages > 0 && (
             <MiniMap
               items={minimapItems}
               visibleStart={visibleStart}
               visibleEnd={visibleEnd}
               onNavigate={handleMinimapNavigate}
-              totalMessages={messages.length}
+              totalMessages={totalMessages}
               searchResults={searchResults}
               currentSearchIndex={currentSearchIndex}
               onSearchResultClick={handleSearchResultClick}

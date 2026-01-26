@@ -914,6 +914,34 @@ input::placeholder {
   position: relative;
 }
 
+/* Immersive conversation section - sticky and fills viewport */
+.conversation-section-immersive {
+  position: sticky;
+  top: 0;
+  min-height: 100vh;
+  margin-bottom: 0;
+  padding-bottom: var(--space-4);
+  background: var(--bg-primary);
+  z-index: 1;
+}
+
+.conversation-section-immersive .conversation-container {
+  height: calc(100vh - 60px);
+}
+
+.conversation-section-immersive .conversation-flow {
+  height: 100%;
+  overflow: auto;
+  contain: strict;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  scroll-behavior: auto;
+}
+
+.conversation-section-immersive .conversation-flow::-webkit-scrollbar {
+  display: none;
+}
+
 .conversation-container {
   display: block;
 }
