@@ -34,6 +34,11 @@ claude --resume <session-id>  # Continue with full context!
 
 The magic: `claude --resume` works because Claude Roam pulls the session into the correct local Claude directory. Claude Code sees it as a local session and resumes with full conversation history.
 
+### Live Demo
+https://github.com/user-attachments/assets/b5e0bfea-5ceb-4cba-9aba-c159bd6d55c4
+
+
+
 ### Core Concepts
 
 #### Complete History Preservation
