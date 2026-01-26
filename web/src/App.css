@@ -924,18 +924,23 @@ input::placeholder {
   gap: var(--space-4);
 }
 
+/* Hide scrollbar for virtual scroll container (use MiniMap for navigation) */
+.virtual-scroll-container::-webkit-scrollbar {
+  display: none;
+}
+
 /* MiniMap - Fixed on the right side */
 .minimap {
   position: fixed;
   right: var(--space-6);
   top: 200px;
-  width: 60px;
+  width: 80px;  /* Increased to accommodate ruler */
   height: calc(100vh - 250px);
   max-height: 500px;
   background: var(--bg-secondary);
   border-radius: var(--radius-md);
   cursor: pointer;
-  overflow: hidden;
+  overflow: visible;  /* Allow ruler ticks to extend */
   z-index: 50;
   opacity: 0.8;
   transition: opacity var(--transition-fast);
@@ -946,15 +951,87 @@ input::placeholder {
   opacity: 1;
 }
 
+/* Position indicator during drag */
+.minimap-position-indicator {
+  position: absolute;
+  left: -80px;
+  padding: 4px 8px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  z-index: 100;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  pointer-events: none;
+}
+
+/* Left ruler area for conversation markers */
+.minimap-ruler {
+  position: absolute;
+  left: 0;
+  top: 20px;
+  bottom: 20px;
+  width: 20px;
+  background: var(--bg-tertiary);
+  border-right: 1px solid var(--border-muted);
+}
+
+/* Viewport indicator on ruler - shows current visible area */
+.minimap-ruler-viewport {
+  position: absolute;
+  left: 0;
+  right: 0;
+  background: linear-gradient(
+    to right,
+    rgba(59, 130, 246, 0.5),
+    rgba(59, 130, 246, 0.3)
+  );
+  border-left: 3px solid #3b82f6;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.minimap-ruler-tick {
+  position: absolute;
+  left: 0;
+  width: 20px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transform: translateY(-50%);
+  z-index: 2;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.minimap-ruler-tick:hover {
+  background: rgba(245, 158, 11, 0.2);
+}
+
+.minimap-ruler-label {
+  font-size: 9px;
+  font-weight: 600;
+  color: #f59e0b;
+  text-shadow: 0 0 2px rgba(0, 0, 0, 0.3);
+}
+
+.minimap-ruler-tick:hover .minimap-ruler-label {
+  color: #ea580c;
+}
+
 .minimap-content {
   position: absolute;
   top: 20px;
-  left: 0;
+  left: 20px;  /* Offset for ruler */
   right: 0;
   bottom: 20px;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .minimap-move-handle {
@@ -1026,9 +1103,32 @@ input::placeholder {
   background: #f3f4f6;
 }
 
-.minimap-viewport {
+.minimap-tree-separator {
+  background: transparent;
+  min-height: 2px;
+  position: relative;
+}
+
+/* Dashed line across the minimap content area */
+.minimap-tree-separator::after {
+  content: '';
   position: absolute;
   left: 0;
+  right: 0;
+  top: 50%;
+  height: 1px;
+  background: repeating-linear-gradient(
+    to right,
+    #f59e0b 0px,
+    #f59e0b 3px,
+    transparent 3px,
+    transparent 6px
+  );
+}
+
+.minimap-viewport {
+  position: absolute;
+  left: 20px;  /* Offset for ruler */
   right: 0;
   background: rgba(255, 255, 255, 0.3);
   border-radius: 2px;
@@ -1469,4 +1569,36 @@ input::placeholder {
 
 .auth-loading p {
   color: var(--text-secondary);
+}
+
+/* Tree Separator */
+.tree-separator {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  margin: var(--space-6) 0;
+  padding: var(--space-2) 0;
+}
+
+.tree-separator-line {
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(
+    to right,
+    transparent,
+    var(--border-muted) 20%,
+    var(--border-muted) 80%,
+    transparent
+  );
+}
+
+.tree-separator-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+  white-space: nowrap;
+  padding: var(--space-1) var(--space-3);
+  background: var(--bg-secondary);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-muted);
 }

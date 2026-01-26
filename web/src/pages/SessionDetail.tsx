@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { getSessionDetail, pullSession, type SessionDetailResponse, type Segment } from '../api'
+import { MiniMap, type MiniMapItem } from '../components/MiniMap'
 
 // Content block types for terminal display
 interface TextBlock {
@@ -25,7 +26,7 @@ interface ToolResultBlock {
 type ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock
 
 // Display types for the terminal - clearer naming for LLM chatbot
-type DisplayType = 'human' | 'assistant' | 'tool_call' | 'tool_result' | 'system'
+type DisplayType = 'human' | 'assistant' | 'tool_call' | 'tool_result' | 'system' | 'tree-separator'
 
 interface DisplayMessage {
   displayType: DisplayType
@@ -33,6 +34,10 @@ interface DisplayMessage {
   toolName?: string  // For tool_call and tool_result
   toolId?: string    // To link tool_call with tool_result
   raw?: Record<string, unknown>  // For system/other messages
+  // For tree-separator
+  treeIndex?: number
+  treeSummaryCount?: number
+  treeTimestamp?: string
 }
 
 // Store tool_use info to link with results
@@ -41,141 +46,426 @@ interface ToolUseInfo {
   name: string
 }
 
+// Raw message from JSONL (for tree building)
+interface RawMessage {
+  uuid?: string
+  parentUuid?: string | null
+  type: string
+  timestamp?: string
+  message?: {
+    content: string | ContentItem[]
+  }
+  summary?: string
+  leafUuid?: string
+  treeIndex?: number
+  treeSummaryCount?: number
+  treeMessageCount?: number
+}
+
+interface ContentItem {
+  type: string
+  text?: string
+  id?: string
+  name?: string
+  input?: Record<string, unknown>
+  tool_use_id?: string
+  content?: string | { text?: string }[]
+  is_error?: boolean
+}
+
+// Build conversation tree and extract all conversation chains
+function buildConversationTree(data: string): RawMessage[] {
+  const lines = data.split('\n').filter(line => line.trim())
+  const messageMap = new Map<string, RawMessage>()
+  const summaries: RawMessage[] = []
+  const childrenMap = new Map<string, string[]>()
+
+  // Map from file-history-snapshot messageId to its inner snapshot.messageId
+  // This is used to repair broken chains where parentUuid points to a snapshot
+  const snapshotIdMap = new Map<string, string>()
+
+  // First pass: parse all lines, collect snapshots and messages
+  const parsedLines: Array<{ type: string; obj: Record<string, unknown> }> = []
+  for (const line of lines) {
+    try {
+      const obj = JSON.parse(line) as Record<string, unknown>
+      const type = obj.type as string
+
+      // Collect file-history-snapshot mappings
+      if (type === 'file-history-snapshot') {
+        const messageId = obj.messageId as string
+        const snapshot = obj.snapshot as { messageId?: string } | undefined
+        if (messageId && snapshot?.messageId) {
+          snapshotIdMap.set(messageId, snapshot.messageId)
+        }
+      }
+
+      parsedLines.push({ type, obj })
+    } catch {
+      // Skip invalid lines
+    }
+  }
+
+  // Second pass: build message map with repaired parentUuid
+  for (const { type, obj } of parsedLines) {
+    if (type === 'summary') {
+      summaries.push(obj as unknown as RawMessage)
+      continue
+    }
+
+    const uuid = obj.uuid as string | undefined
+    if (uuid) {
+      // Repair parentUuid if it points to a snapshot
+      let parentUuid = obj.parentUuid as string | null | undefined
+      if (parentUuid && snapshotIdMap.has(parentUuid)) {
+        // Replace snapshot messageId with its inner messageId
+        parentUuid = snapshotIdMap.get(parentUuid)!
+        obj.parentUuid = parentUuid
+      }
+
+      messageMap.set(uuid, obj as unknown as RawMessage)
+
+      // Track parent-child relationships
+      const parentId = parentUuid || 'ROOT'
+      if (!childrenMap.has(parentId)) {
+        childrenMap.set(parentId, [])
+      }
+      childrenMap.get(parentId)!.push(uuid)
+    }
+  }
+
+  // Helper: find root of a message (or the earliest reachable ancestor if chain is broken)
+  const getRoot = (uuid: string): string | null => {
+    let current = uuid
+    let lastValid: string | null = null
+    while (current && messageMap.has(current)) {
+      lastValid = current
+      const msg = messageMap.get(current)!
+      if (!msg.parentUuid) return current
+      // Check if parent exists in map - if not, this is effectively a root
+      if (!messageMap.has(msg.parentUuid)) {
+        return current
+      }
+      current = msg.parentUuid
+    }
+    return lastValid
+  }
+
+  // Helper: build chain from root to leaf
+  const buildChain = (leafUuid: string): RawMessage[] => {
+    const chain: RawMessage[] = []
+    let current: string | null = leafUuid
+    while (current) {
+      const msg = messageMap.get(current)
+      if (msg) {
+        chain.unshift(msg)
+        current = msg.parentUuid || null
+      } else {
+        break
+      }
+    }
+    return chain
+  }
+
+  // Find all root nodes (messages with no parent)
+  const rootUuids = childrenMap.get('ROOT') || []
+
+  if (rootUuids.length === 0) {
+    if (summaries.length > 0) {
+      return summaries
+    }
+    return Array.from(messageMap.values())
+  }
+
+  // Find all leaf nodes (nodes with no children)
+  const allUuids = new Set(messageMap.keys())
+  const parentUuids = new Set<string>()
+  for (const msg of messageMap.values()) {
+    if (msg.parentUuid) {
+      parentUuids.add(msg.parentUuid)
+    }
+  }
+  const leafUuids = new Set<string>()
+  for (const uuid of allUuids) {
+    if (!parentUuids.has(uuid)) {
+      leafUuids.add(uuid)
+    }
+  }
+
+  // Group leaves by their root
+  const leavesByRoot = new Map<string, string[]>()
+  for (const leaf of leafUuids) {
+    const root = getRoot(leaf)
+    if (root) {
+      if (!leavesByRoot.has(root)) {
+        leavesByRoot.set(root, [])
+      }
+      leavesByRoot.get(root)!.push(leaf)
+    }
+  }
+
+  // Group summaries by the root of their leafUuid
+  const summariesByRoot = new Map<string, RawMessage[]>()
+  const orphanedSummaries: RawMessage[] = []
+  for (const summary of summaries) {
+    if (summary.leafUuid) {
+      const root = getRoot(summary.leafUuid)
+      if (root) {
+        if (!summariesByRoot.has(root)) {
+          summariesByRoot.set(root, [])
+        }
+        summariesByRoot.get(root)!.push(summary)
+      } else {
+        orphanedSummaries.push(summary)
+      }
+    } else {
+      orphanedSummaries.push(summary)
+    }
+  }
+
+  // Collect all effective roots: both true roots (no parent) AND broken chain roots
+  // (messages whose parent doesn't exist in the map)
+  const allEffectiveRoots = new Set<string>(rootUuids)
+  for (const root of leavesByRoot.keys()) {
+    if (!allEffectiveRoots.has(root)) {
+      allEffectiveRoots.add(root)
+    }
+  }
+
+  // Sort roots by the timestamp of their most recent leaf
+  const rootsWithLatestTime: [string, string][] = []
+  for (const root of allEffectiveRoots) {
+    const leaves = leavesByRoot.get(root) || []
+    let latestTime = ''
+    for (const leaf of leaves) {
+      const msg = messageMap.get(leaf)
+      if (msg?.timestamp && msg.timestamp > latestTime) {
+        latestTime = msg.timestamp
+      }
+    }
+    rootsWithLatestTime.push([root, latestTime])
+  }
+  rootsWithLatestTime.sort((a, b) => a[1].localeCompare(b[1]))
+
+  // Build result
+  const result: RawMessage[] = []
+  const processedChainUuids = new Set<string>()
+  let treeIndex = 0
+
+  // First, add orphaned summaries
+  if (orphanedSummaries.length > 0) {
+    treeIndex++
+    const separator: RawMessage = {
+      type: 'tree-separator',
+      treeIndex,
+      treeSummaryCount: orphanedSummaries.length,
+      treeMessageCount: 0,
+      timestamp: ''
+    }
+    result.push(separator)
+    for (const summary of orphanedSummaries) {
+      result.push(summary)
+    }
+  }
+
+  for (const [root] of rootsWithLatestTime) {
+    const leaves = leavesByRoot.get(root) || []
+    const treeSummaries = summariesByRoot.get(root) || []
+
+    // Find the most recent leaf in this tree
+    let currentLeaf: string | null = null
+    let latestTimestamp = ''
+    for (const leaf of leaves) {
+      const msg = messageMap.get(leaf)
+      if (msg?.timestamp && msg.timestamp > latestTimestamp) {
+        latestTimestamp = msg.timestamp
+        currentLeaf = leaf
+      }
+    }
+
+    if (!currentLeaf) continue
+
+    // Build the main chain
+    const chain = buildChain(currentLeaf)
+    const chainUuids = new Set(chain.map(m => m.uuid).filter(Boolean) as string[])
+
+    // Count summaries not in main chain
+    const branchSummaries = treeSummaries.filter(s => s.leafUuid && !chainUuids.has(s.leafUuid))
+
+    // Add tree separator
+    treeIndex++
+    if (treeIndex > 1 || branchSummaries.length > 0 || rootsWithLatestTime.length > 1) {
+      const separator: RawMessage = {
+        type: 'tree-separator',
+        treeIndex,
+        treeSummaryCount: branchSummaries.length,
+        treeMessageCount: chain.length,
+        timestamp: latestTimestamp
+      }
+      result.push(separator)
+    }
+
+    // Add summaries for branches NOT in the main chain
+    for (const summary of branchSummaries) {
+      result.push(summary)
+    }
+
+    // Add the main chain
+    for (const msg of chain) {
+      if (msg.uuid && !processedChainUuids.has(msg.uuid)) {
+        processedChainUuids.add(msg.uuid)
+        result.push(msg)
+      }
+    }
+  }
+
+  return result
+}
+
 function parseMessages(data: string): DisplayMessage[] {
   const messages: DisplayMessage[] = []
-  const lines = data.split('\n').filter(line => line.trim())
+
+  // Use tree building to get the correct conversation chain
+  const rawMessages = buildConversationTree(data)
 
   // Track tool_use IDs to their names for linking with results
   const toolUseMap = new Map<string, ToolUseInfo>()
 
-  for (const line of lines) {
-    try {
-      const obj = JSON.parse(line)
-      const topType = obj.type as string
+  for (const obj of rawMessages) {
+    const topType = obj.type as string
 
-      // Skip internal types
-      if (topType === 'file-history-snapshot' || topType === 'queue-operation') {
-        continue
+    // Skip internal types
+    if (topType === 'file-history-snapshot' || topType === 'queue-operation') {
+      continue
+    }
+
+    // Handle tree-separator
+    if (topType === 'tree-separator') {
+      messages.push({
+        displayType: 'tree-separator',
+        blocks: [],
+        treeIndex: obj.treeIndex,
+        treeSummaryCount: obj.treeSummaryCount,
+        treeTimestamp: obj.timestamp
+      })
+      continue
+    }
+
+    // Handle system messages (hooks, etc.)
+    if (topType === 'system') {
+      messages.push({
+        displayType: 'system',
+        blocks: [],
+        raw: obj as unknown as Record<string, unknown>
+      })
+      continue
+    }
+
+    // Handle summary
+    if (topType === 'summary') {
+      messages.push({
+        displayType: 'system',
+        blocks: [{ type: 'text', content: `Summary: ${obj.summary || ''}` }],
+        raw: obj as unknown as Record<string, unknown>
+      })
+      continue
+    }
+
+    // Handle user/assistant messages
+    if ((topType === 'user' || topType === 'assistant') && obj.message) {
+      const msg = obj.message
+      const content = msg.content
+
+      // Parse content blocks
+      const textBlocks: ContentBlock[] = []
+      const toolUseBlocks: ContentBlock[] = []
+      const toolResultBlocks: ContentBlock[] = []
+
+      if (typeof content === 'string') {
+        if (content.trim()) {
+          textBlocks.push({ type: 'text', content })
+        }
+      } else if (Array.isArray(content)) {
+        for (const item of content) {
+          if (item.type === 'text' && item.text) {
+            textBlocks.push({ type: 'text', content: item.text })
+          } else if (item.type === 'tool_use') {
+            const toolId = item.id || ''
+            const toolName = item.name || 'unknown_tool'
+            // Store for linking with results
+            toolUseMap.set(toolId, { id: toolId, name: toolName })
+            toolUseBlocks.push({
+              type: 'tool_use',
+              id: toolId,
+              name: toolName,
+              input: item.input || {}
+            })
+          } else if (item.type === 'tool_result') {
+            let resultContent = ''
+            if (typeof item.content === 'string') {
+              resultContent = item.content
+            } else if (Array.isArray(item.content)) {
+              resultContent = item.content
+                .map((c: { type?: string; text?: string }) => c.text || '')
+                .join('\n')
+            } else if (item.content) {
+              resultContent = JSON.stringify(item.content, null, 2)
+            }
+            toolResultBlocks.push({
+              type: 'tool_result',
+              tool_use_id: item.tool_use_id || '',
+              content: resultContent,
+              is_error: item.is_error
+            })
+          }
+        }
       }
 
-      // Handle system messages (hooks, etc.)
-      if (topType === 'system') {
+      // Create display messages based on content types
+      // User + text = Human
+      if (topType === 'user' && textBlocks.length > 0) {
         messages.push({
-          displayType: 'system',
-          blocks: [],
-          raw: obj
+          displayType: 'human',
+          blocks: textBlocks
         })
-        continue
       }
 
-      // Handle summary
-      if (topType === 'summary') {
+      // User + tool_result = Tool Result (with linked tool name)
+      if (topType === 'user' && toolResultBlocks.length > 0) {
+        for (const block of toolResultBlocks) {
+          if (block.type === 'tool_result') {
+            const toolInfo = toolUseMap.get(block.tool_use_id)
+            messages.push({
+              displayType: 'tool_result',
+              blocks: [block],
+              toolName: toolInfo?.name || 'unknown',
+              toolId: block.tool_use_id
+            })
+          }
+        }
+      }
+
+      // Assistant + text = Assistant
+      if (topType === 'assistant' && textBlocks.length > 0) {
         messages.push({
-          displayType: 'system',
-          blocks: [{ type: 'text', content: `Summary: ${obj.summary || ''}` }],
-          raw: obj
+          displayType: 'assistant',
+          blocks: textBlocks
         })
-        continue
       }
 
-      // Handle user/assistant messages
-      if ((topType === 'user' || topType === 'assistant') && obj.message) {
-        const msg = obj.message
-        const content = msg.content
-
-        // Parse content blocks
-        const textBlocks: ContentBlock[] = []
-        const toolUseBlocks: ContentBlock[] = []
-        const toolResultBlocks: ContentBlock[] = []
-
-        if (typeof content === 'string') {
-          if (content.trim()) {
-            textBlocks.push({ type: 'text', content })
-          }
-        } else if (Array.isArray(content)) {
-          for (const item of content) {
-            if (item.type === 'text' && item.text) {
-              textBlocks.push({ type: 'text', content: item.text })
-            } else if (item.type === 'tool_use') {
-              const toolId = item.id || ''
-              const toolName = item.name || 'unknown_tool'
-              // Store for linking with results
-              toolUseMap.set(toolId, { id: toolId, name: toolName })
-              toolUseBlocks.push({
-                type: 'tool_use',
-                id: toolId,
-                name: toolName,
-                input: item.input || {}
-              })
-            } else if (item.type === 'tool_result') {
-              let resultContent = ''
-              if (typeof item.content === 'string') {
-                resultContent = item.content
-              } else if (Array.isArray(item.content)) {
-                resultContent = item.content
-                  .map((c: { type?: string; text?: string }) => c.text || '')
-                  .join('\n')
-              } else if (item.content) {
-                resultContent = JSON.stringify(item.content, null, 2)
-              }
-              toolResultBlocks.push({
-                type: 'tool_result',
-                tool_use_id: item.tool_use_id || '',
-                content: resultContent,
-                is_error: item.is_error
-              })
-            }
-          }
-        }
-
-        // Create display messages based on content types
-        // User + text = Human
-        if (topType === 'user' && textBlocks.length > 0) {
-          messages.push({
-            displayType: 'human',
-            blocks: textBlocks
-          })
-        }
-
-        // User + tool_result = Tool Result (with linked tool name)
-        if (topType === 'user' && toolResultBlocks.length > 0) {
-          for (const block of toolResultBlocks) {
-            if (block.type === 'tool_result') {
-              const toolInfo = toolUseMap.get(block.tool_use_id)
-              messages.push({
-                displayType: 'tool_result',
-                blocks: [block],
-                toolName: toolInfo?.name || 'unknown',
-                toolId: block.tool_use_id
-              })
-            }
-          }
-        }
-
-        // Assistant + text = Assistant
-        if (topType === 'assistant' && textBlocks.length > 0) {
-          messages.push({
-            displayType: 'assistant',
-            blocks: textBlocks
-          })
-        }
-
-        // Assistant + tool_use = Tool Call
-        if (topType === 'assistant' && toolUseBlocks.length > 0) {
-          for (const block of toolUseBlocks) {
-            if (block.type === 'tool_use') {
-              messages.push({
-                displayType: 'tool_call',
-                blocks: [block],
-                toolName: block.name,
-                toolId: block.id
-              })
-            }
+      // Assistant + tool_use = Tool Call
+      if (topType === 'assistant' && toolUseBlocks.length > 0) {
+        for (const block of toolUseBlocks) {
+          if (block.type === 'tool_use') {
+            messages.push({
+              displayType: 'tool_call',
+              blocks: [block],
+              toolName: block.name,
+              toolId: block.id
+            })
           }
         }
       }
-    } catch {
-      // Skip invalid lines
     }
   }
 
@@ -350,203 +640,6 @@ function SystemDisplay({ raw }: { raw?: Record<string, unknown> }) {
   )
 }
 
-// MiniMap item info
-interface MiniMapItem {
-  type: DisplayType
-  index: number
-  heightRatio: number  // 0-1, ratio of total conversation height
-}
-
-// MiniMap component
-function MiniMap({
-  items,
-  visibleStart,
-  visibleEnd,
-  onNavigate
-}: {
-  items: MiniMapItem[]
-  visibleStart: number  // 0-1, where visible area starts
-  visibleEnd: number    // 0-1, where visible area ends
-  onNavigate: (ratio: number) => void
-}) {
-  const minimapRef = useRef<HTMLDivElement>(null)
-  const contentRef = useRef<HTMLDivElement>(null)
-  const isDragging = useRef(false)
-  const isResizing = useRef(false)
-  const isMoving = useRef(false)
-  const dragOffset = useRef({ x: 0, y: 0 })
-  const [, forceUpdate] = useState(0)
-
-  // Position and size state (load from localStorage)
-  const [position, setPosition] = useState(() => {
-    const saved = localStorage.getItem('minimap-position')
-    return saved ? JSON.parse(saved) : { top: 200, right: 24 }
-  })
-  const [height, setHeight] = useState(() => {
-    const saved = localStorage.getItem('minimap-height')
-    return saved ? parseInt(saved) : 500
-  })
-
-  // Save to localStorage
-  useEffect(() => {
-    localStorage.setItem('minimap-position', JSON.stringify(position))
-  }, [position])
-
-  useEffect(() => {
-    localStorage.setItem('minimap-height', String(height))
-  }, [height])
-
-  const handleMouseDown = useCallback((e: React.MouseEvent) => {
-    // Check if clicking on resize handle
-    const target = e.target as HTMLElement
-    if (target.classList.contains('minimap-resize-handle')) {
-      isResizing.current = true
-      e.preventDefault()
-      return
-    }
-    // Check if clicking on move handle
-    if (target.classList.contains('minimap-move-handle')) {
-      isMoving.current = true
-      if (minimapRef.current) {
-        const rect = minimapRef.current.getBoundingClientRect()
-        dragOffset.current = {
-          x: e.clientX - rect.left,
-          y: e.clientY - rect.top
-        }
-      }
-      e.preventDefault()
-      return
-    }
-    // Otherwise, navigate
-    isDragging.current = true
-    handleNavigateClick(e)
-  }, [])
-
-  const handleNavigateClick = useCallback((e: React.MouseEvent) => {
-    if (!contentRef.current) return
-    const rect = contentRef.current.getBoundingClientRect()
-    const y = e.clientY - rect.top
-    const ratio = Math.max(0, Math.min(1, y / rect.height))
-    onNavigate(ratio)
-  }, [onNavigate])
-
-  const handleMouseMove = useCallback((e: React.MouseEvent) => {
-    if (isResizing.current) {
-      if (!minimapRef.current) return
-      const rect = minimapRef.current.getBoundingClientRect()
-      const newHeight = Math.max(100, Math.min(window.innerHeight - 50, e.clientY - rect.top))
-      setHeight(newHeight)
-      return
-    }
-    if (isMoving.current) {
-      const newTop = e.clientY - dragOffset.current.y
-      const newRight = window.innerWidth - e.clientX - (60 - dragOffset.current.x)
-      setPosition({
-        top: Math.max(50, Math.min(window.innerHeight - 200, newTop)),
-        right: Math.max(10, Math.min(window.innerWidth - 100, newRight))
-      })
-      return
-    }
-    if (isDragging.current) {
-      handleNavigateClick(e)
-    }
-  }, [handleNavigateClick])
-
-  useEffect(() => {
-    const handleGlobalMouseUp = () => {
-      isDragging.current = false
-      isResizing.current = false
-      isMoving.current = false
-    }
-    const handleGlobalMouseMove = (e: MouseEvent) => {
-      if (isResizing.current && minimapRef.current) {
-        const rect = minimapRef.current.getBoundingClientRect()
-        const newHeight = Math.max(100, Math.min(window.innerHeight - 50, e.clientY - rect.top))
-        setHeight(newHeight)
-      }
-      if (isMoving.current) {
-        const newTop = e.clientY - dragOffset.current.y
-        const newRight = window.innerWidth - e.clientX - (60 - dragOffset.current.x)
-        setPosition({
-          top: Math.max(50, Math.min(window.innerHeight - 200, newTop)),
-          right: Math.max(10, Math.min(window.innerWidth - 100, newRight))
-        })
-      }
-    }
-    window.addEventListener('mouseup', handleGlobalMouseUp)
-    window.addEventListener('mousemove', handleGlobalMouseMove)
-    return () => {
-      window.removeEventListener('mouseup', handleGlobalMouseUp)
-      window.removeEventListener('mousemove', handleGlobalMouseMove)
-    }
-  }, [])
-
-  // Force re-render when height changes to recalculate viewport
-  useEffect(() => {
-    forceUpdate(n => n + 1)
-  }, [height])
-
-  // Get actual content area dimensions from ref
-  const [contentRect, setContentRect] = useState({ top: 20, height: height - 40 })
-
-  useEffect(() => {
-    if (contentRef.current) {
-      const updateRect = () => {
-        const rect = contentRef.current?.getBoundingClientRect()
-        const parentRect = minimapRef.current?.getBoundingClientRect()
-        if (rect && parentRect) {
-          setContentRect({
-            top: rect.top - parentRect.top,
-            height: rect.height
-          })
-        }
-      }
-      updateRect()
-      const observer = new ResizeObserver(updateRect)
-      observer.observe(contentRef.current)
-      return () => observer.disconnect()
-    }
-  }, [height, items])
-
-  // Viewport position based on actual measured content area
-  const viewportTop = contentRect.top + visibleStart * contentRect.height
-  const viewportHeight = (visibleEnd - visibleStart) * contentRect.height
-
-  return (
-    <div
-      className="minimap"
-      ref={minimapRef}
-      style={{
-        top: `${position.top}px`,
-        right: `${position.right}px`,
-        height: `${height}px`,
-        maxHeight: 'none'
-      }}
-      onMouseDown={handleMouseDown}
-      onMouseMove={handleMouseMove}
-    >
-      <div className="minimap-move-handle" title="Drag to move">⋮⋮</div>
-      <div className="minimap-content" ref={contentRef}>
-        {items.map((item, i) => (
-          <div
-            key={i}
-            className={`minimap-item minimap-${item.type}`}
-            style={{ flex: `${item.heightRatio} 0 0` }}
-          />
-        ))}
-      </div>
-      <div
-        className="minimap-viewport"
-        style={{
-          top: `${viewportTop}px`,
-          height: `${viewportHeight}px`
-        }}
-      />
-      <div className="minimap-resize-handle" title="Drag to resize">═</div>
-    </div>
-  )
-}
-
 function SessionDetail() {
   const { id } = useParams<{ id: string }>()
   const [detail, setDetail] = useState<SessionDetailResponse | null>(null)
@@ -589,11 +682,16 @@ function SessionDetail() {
         const ratio = heightWithGap / totalHeight
         sumRatio += ratio
 
-        items.push({
+        const item: MiniMapItem = {
           type: messages[i].displayType,
           index: i,
           heightRatio: ratio
-        })
+        }
+        // Pass treeIndex for tree-separator items
+        if (messages[i].displayType === 'tree-separator' && messages[i].treeIndex) {
+          item.treeIndex = messages[i].treeIndex
+        }
+        items.push(item)
       }
       setMinimapItems(items)
     }
@@ -760,6 +858,20 @@ function SessionDetail() {
               </div>
             ) : (
               messages.map((msg, i) => {
+                // Tree separator - shows conversation tree index
+                if (msg.displayType === 'tree-separator') {
+                  return (
+                    <div key={i} className="tree-separator">
+                      <div className="tree-separator-line" />
+                      <div className="tree-separator-label">
+                        Conversation {msg.treeIndex}
+                        {msg.treeSummaryCount ? ` (${msg.treeSummaryCount} summarized branches)` : ''}
+                      </div>
+                      <div className="tree-separator-line" />
+                    </div>
+                  )
+                }
+
                 // Human message - user input text
                 if (msg.displayType === 'human') {
                   return (

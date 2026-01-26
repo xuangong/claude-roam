@@ -168,6 +168,66 @@ export function parseRemoteDir(remoteDir: string): { machine: string; path: stri
 }
 
 
+// ============ Backup config ============
+
+export interface BackupConfig {
+  enabled: boolean;
+  directory: string;  // Backup directory path
+  retentionDays: number;  // How many days to keep backups
+  intervalHours: number;  // Incremental backup interval in hours
+  fullIntervalDays: number;  // Full backup interval in days
+  lastBackup?: string;  // ISO timestamp of last incremental backup
+  lastFullBackup?: string;  // ISO timestamp of last full backup
+  // Track session states for incremental backup
+  sessionSnapshots?: Record<string, { lineCount: number; modifiedAt: string }>;
+}
+
+/**
+ * Get backup config with defaults
+ */
+export function getBackupConfig(): BackupConfig {
+  const state = loadState() as State & { backup?: Partial<BackupConfig> };
+  const defaultDir = path.join(os.homedir(), ".claude-roam", "backups");
+  return {
+    enabled: state.backup?.enabled ?? false,
+    directory: state.backup?.directory ?? defaultDir,
+    retentionDays: state.backup?.retentionDays ?? 30,
+    intervalHours: state.backup?.intervalHours ?? 6,
+    fullIntervalDays: state.backup?.fullIntervalDays ?? 7,
+    lastBackup: state.backup?.lastBackup,
+    lastFullBackup: state.backup?.lastFullBackup,
+    sessionSnapshots: state.backup?.sessionSnapshots,
+  };
+}
+
+/**
+ * Save backup config
+ */
+export function saveBackupConfig(config: Partial<BackupConfig>): void {
+  const state = loadState() as State & { backup?: Partial<BackupConfig> };
+  state.backup = { ...state.backup, ...config };
+  saveState(state as State);
+}
+
+/**
+ * Update last backup timestamp
+ */
+export function updateLastBackup(type: 'incremental' | 'full' = 'incremental'): void {
+  const now = new Date().toISOString();
+  if (type === 'full') {
+    saveBackupConfig({ lastBackup: now, lastFullBackup: now });
+  } else {
+    saveBackupConfig({ lastBackup: now });
+  }
+}
+
+/**
+ * Update session snapshots (for incremental tracking)
+ */
+export function updateSessionSnapshots(snapshots: Record<string, { lineCount: number; modifiedAt: string }>): void {
+  saveBackupConfig({ sessionSnapshots: snapshots });
+}
+
 // ============ Auth functions ============
 
 /**

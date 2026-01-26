@@ -1,4 +1,13 @@
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
+import { useVirtualizer } from '@tanstack/react-virtual'
+import { MiniMap, type MiniMapItem, type SeparatorPosition } from '../components/MiniMap'
+import {
+  type DisplayMessage,
+  hashString,
+  isSessionCached,
+  getSessionMeta,
+  MessageCache
+} from '../utils/messageStore'
 
 // Roam bundle types
 export interface RoamSession {
@@ -37,156 +46,542 @@ export interface RoamBundleV2 {
 
 export type RoamBundle = RoamBundleV1 | RoamBundleV2
 
-// ========== Reuse message parsing and display from SessionDetail ==========
-interface TextBlock {
-  type: 'text'
-  content: string
-}
+// Create Web Worker for parsing and storing messages
+function createParserWorker(): Worker {
+  const workerCode = `
+    const CHUNK_SIZE = 100;
 
-interface ToolUseBlock {
-  type: 'tool_use'
-  id: string
-  name: string
-  input: Record<string, unknown>
-}
+    // IndexedDB operations in worker
+    const DB_NAME = 'claude-roam-messages';
+    const DB_VERSION = 1;
+    const STORE_CHUNKS = 'message-chunks';
+    const STORE_META = 'session-meta';
 
-interface ToolResultBlock {
-  type: 'tool_result'
-  tool_use_id: string
-  content: string
-  is_error?: boolean
-}
+    let db = null;
 
-type ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock
-type DisplayType = 'human' | 'assistant' | 'tool_call' | 'tool_result' | 'system'
+    function openDB() {
+      return new Promise((resolve, reject) => {
+        if (db) { resolve(db); return; }
+        const request = indexedDB.open(DB_NAME, DB_VERSION);
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => { db = request.result; resolve(db); };
+        request.onupgradeneeded = (event) => {
+          const database = event.target.result;
+          if (!database.objectStoreNames.contains(STORE_CHUNKS)) {
+            const store = database.createObjectStore(STORE_CHUNKS, { keyPath: ['sessionId', 'chunkIndex'] });
+            store.createIndex('sessionId', 'sessionId', { unique: false });
+          }
+          if (!database.objectStoreNames.contains(STORE_META)) {
+            database.createObjectStore(STORE_META, { keyPath: 'sessionId' });
+          }
+        };
+      });
+    }
 
-interface DisplayMessage {
-  displayType: DisplayType
-  blocks: ContentBlock[]
-  toolName?: string
-  toolId?: string
-  raw?: Record<string, unknown>
-}
+    async function saveChunk(sessionId, chunkIndex, messages) {
+      const database = await openDB();
+      return new Promise((resolve, reject) => {
+        const tx = database.transaction(STORE_CHUNKS, 'readwrite');
+        const store = tx.objectStore(STORE_CHUNKS);
+        const request = store.put({ sessionId, chunkIndex, messages });
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => resolve();
+      });
+    }
 
-interface ToolUseInfo {
-  id: string
-  name: string
-}
+    async function saveMeta(meta) {
+      const database = await openDB();
+      return new Promise((resolve, reject) => {
+        const tx = database.transaction(STORE_META, 'readwrite');
+        const store = tx.objectStore(STORE_META);
+        const request = store.put(meta);
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => resolve();
+      });
+    }
 
-function parseMessages(data: string): DisplayMessage[] {
-  const messages: DisplayMessage[] = []
-  const lines = data.split('\n').filter(line => line.trim())
-  const toolUseMap = new Map<string, ToolUseInfo>()
+    async function clearSessionData(sessionId) {
+      const database = await openDB();
+      // Clear chunks
+      await new Promise((resolve, reject) => {
+        const tx = database.transaction(STORE_CHUNKS, 'readwrite');
+        const store = tx.objectStore(STORE_CHUNKS);
+        const index = store.index('sessionId');
+        const request = index.openCursor(IDBKeyRange.only(sessionId));
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => {
+          const cursor = request.result;
+          if (cursor) { cursor.delete(); cursor.continue(); }
+          else { resolve(); }
+        };
+      });
+      // Clear meta
+      await new Promise((resolve, reject) => {
+        const tx = database.transaction(STORE_META, 'readwrite');
+        const store = tx.objectStore(STORE_META);
+        const request = store.delete(sessionId);
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => resolve();
+      });
+    }
 
-  for (const line of lines) {
-    try {
-      const obj = JSON.parse(line)
-      const topType = obj.type as string
+    // Helper functions
+    const truncate = (str, maxLen) => {
+      if (!str || typeof str !== 'string') return str;
+      if (str.length <= maxLen) return str;
+      return str.substring(0, maxLen) + '...[' + (str.length - maxLen) + ' more]';
+    };
 
-      if (topType === 'file-history-snapshot' || topType === 'queue-operation') continue
+    const limitInput = (input) => {
+      if (!input || typeof input !== 'object') return input;
+      const result = {};
+      for (const key in input) {
+        const val = input[key];
+        if (typeof val === 'string' && val.length > 10000) {
+          result[key] = truncate(val, 10000);
+        } else {
+          result[key] = val;
+        }
+      }
+      return result;
+    };
 
-      if (topType === 'system') {
-        messages.push({ displayType: 'system', blocks: [], raw: obj })
-        continue
+    // Truncate message content during first pass to reduce memory
+    const truncateMessageForTree = (obj) => {
+      // Only keep essential fields for tree building
+      const result = {
+        uuid: obj.uuid,
+        parentUuid: obj.parentUuid,
+        type: obj.type,
+        timestamp: obj.timestamp
+      };
+
+      // Keep message but truncate content
+      if (obj.message && obj.message.content) {
+        const content = obj.message.content;
+        if (typeof content === 'string') {
+          result.message = { ...obj.message, content: truncate(content, 50000) };
+        } else if (Array.isArray(content)) {
+          result.message = {
+            ...obj.message,
+            content: content.map(item => {
+              if (item.type === 'text' && item.text) {
+                return { ...item, text: truncate(item.text, 50000) };
+              }
+              if (item.type === 'tool_use' && item.input) {
+                return { ...item, input: limitInput(item.input) };
+              }
+              if (item.type === 'tool_result') {
+                let resultContent = item.content;
+                if (typeof resultContent === 'string') {
+                  resultContent = truncate(resultContent, 50000);
+                } else if (Array.isArray(resultContent)) {
+                  resultContent = resultContent.map(c => c.text ? { ...c, text: truncate(c.text, 50000) } : c);
+                }
+                return { ...item, content: resultContent };
+              }
+              return item;
+            })
+          };
+        } else {
+          result.message = obj.message;
+        }
       }
 
-      if (topType === 'summary') {
-        messages.push({
+      // For summaries
+      if (obj.summary) {
+        result.summary = truncate(obj.summary, 5000);
+      }
+      if (obj.leafUuid) {
+        result.leafUuid = obj.leafUuid;
+      }
+
+      return result;
+    };
+
+    // Process a raw message object into display messages
+    function processRawMessage(obj, toolUseMap) {
+      const results = [];
+      const msgType = obj.type;
+
+      if (msgType === 'file-history-snapshot' || msgType === 'queue-operation') {
+        return results;
+      }
+
+      if (msgType === 'system') {
+        results.push({ displayType: 'system', blocks: [] });
+        return results;
+      }
+
+      if (msgType === 'summary') {
+        results.push({
           displayType: 'system',
-          blocks: [{ type: 'text', content: `Summary: ${obj.summary || ''}` }],
-          raw: obj
-        })
-        continue
+          blocks: [{ type: 'text', content: '[Compacted] ' + truncate(obj.summary || '', 5000) }]
+        });
+        return results;
       }
 
-      if ((topType === 'user' || topType === 'assistant') && obj.message) {
-        const msg = obj.message
-        const content = msg.content
-
-        const textBlocks: ContentBlock[] = []
-        const toolUseBlocks: ContentBlock[] = []
-        const toolResultBlocks: ContentBlock[] = []
+      if ((msgType === 'user' || msgType === 'assistant') && obj.message) {
+        const content = obj.message.content;
 
         if (typeof content === 'string') {
           if (content.trim()) {
-            textBlocks.push({ type: 'text', content })
+            results.push({
+              displayType: msgType === 'user' ? 'human' : 'assistant',
+              blocks: [{ type: 'text', content: truncate(content, 50000) }]
+            });
           }
         } else if (Array.isArray(content)) {
+          const textParts = [];
+
           for (const item of content) {
             if (item.type === 'text' && item.text) {
-              textBlocks.push({ type: 'text', content: item.text })
+              textParts.push(truncate(item.text, 50000));
             } else if (item.type === 'tool_use') {
-              const toolId = item.id || ''
-              const toolName = item.name || 'unknown_tool'
-              toolUseMap.set(toolId, { id: toolId, name: toolName })
-              toolUseBlocks.push({
-                type: 'tool_use',
-                id: toolId,
-                name: toolName,
-                input: item.input || {}
-              })
-            } else if (item.type === 'tool_result') {
-              let resultContent = ''
-              if (typeof item.content === 'string') {
-                resultContent = item.content
-              } else if (Array.isArray(item.content)) {
-                resultContent = item.content
-                  .map((c: { type?: string; text?: string }) => c.text || '')
-                  .join('\n')
-              } else if (item.content) {
-                resultContent = JSON.stringify(item.content, null, 2)
+              if (textParts.length > 0 && msgType === 'assistant') {
+                results.push({
+                  displayType: 'assistant',
+                  blocks: [{ type: 'text', content: textParts.join('') }]
+                });
+                textParts.length = 0;
               }
-              toolResultBlocks.push({
-                type: 'tool_result',
-                tool_use_id: item.tool_use_id || '',
-                content: resultContent,
-                is_error: item.is_error
-              })
-            }
-          }
-        }
-
-        if (topType === 'user' && textBlocks.length > 0) {
-          messages.push({ displayType: 'human', blocks: textBlocks })
-        }
-
-        if (topType === 'user' && toolResultBlocks.length > 0) {
-          for (const block of toolResultBlocks) {
-            if (block.type === 'tool_result') {
-              const toolInfo = toolUseMap.get(block.tool_use_id)
-              messages.push({
-                displayType: 'tool_result',
-                blocks: [block],
-                toolName: toolInfo?.name || 'unknown',
-                toolId: block.tool_use_id
-              })
-            }
-          }
-        }
-
-        if (topType === 'assistant' && textBlocks.length > 0) {
-          messages.push({ displayType: 'assistant', blocks: textBlocks })
-        }
-
-        if (topType === 'assistant' && toolUseBlocks.length > 0) {
-          for (const block of toolUseBlocks) {
-            if (block.type === 'tool_use') {
-              messages.push({
+              const toolId = item.id || '';
+              const toolName = item.name || 'unknown_tool';
+              toolUseMap.set(toolId, { id: toolId, name: toolName });
+              results.push({
                 displayType: 'tool_call',
-                blocks: [block],
-                toolName: block.name,
-                toolId: block.id
-              })
+                blocks: [{ type: 'tool_use', id: toolId, name: toolName, input: limitInput(item.input || {}) }],
+                toolName: toolName,
+                toolId: toolId
+              });
+            } else if (item.type === 'tool_result') {
+              if (textParts.length > 0 && msgType === 'user') {
+                results.push({
+                  displayType: 'human',
+                  blocks: [{ type: 'text', content: textParts.join('') }]
+                });
+                textParts.length = 0;
+              }
+              let resultContent = '';
+              if (typeof item.content === 'string') {
+                resultContent = item.content;
+              } else if (Array.isArray(item.content)) {
+                resultContent = item.content.map(c => c.text || '').join('\\n');
+              } else if (item.content) {
+                try { resultContent = JSON.stringify(item.content, null, 2); }
+                catch { resultContent = '[Error]'; }
+              }
+              const toolInfo = toolUseMap.get(item.tool_use_id);
+              results.push({
+                displayType: 'tool_result',
+                blocks: [{ type: 'tool_result', tool_use_id: item.tool_use_id || '', content: truncate(resultContent, 50000), is_error: item.is_error }],
+                toolName: toolInfo ? toolInfo.name : 'unknown',
+                toolId: item.tool_use_id
+              });
             }
+          }
+
+          if (textParts.length > 0) {
+            results.push({
+              displayType: msgType === 'user' ? 'human' : 'assistant',
+              blocks: [{ type: 'text', content: textParts.join('') }]
+            });
           }
         }
       }
-    } catch {
-      // Skip invalid lines
-    }
-  }
 
-  return messages
+      return results;
+    }
+
+    self.onmessage = async function(e) {
+      const { data, sessionId, dataHash } = e.data;
+
+      try {
+        self.postMessage({ type: 'progress', message: 'Clearing old data...' });
+        await clearSessionData(sessionId);
+
+        self.postMessage({ type: 'progress', message: 'Processing data stream...' });
+
+        // Stream processing - avoid creating lines array
+        // First pass: collect only uuid/parentUuid relationships (minimal data)
+        const parentMap = new Map();  // uuid -> parentUuid
+        const timestampMap = new Map();  // uuid -> timestamp
+        const typeMap = new Map();  // uuid -> type
+        const snapshotIdMap = new Map();
+        const summaryUuids = [];
+
+        let lineStart = 0;
+        let lineCount = 0;
+        const dataLen = data.length;
+
+        for (let i = 0; i <= dataLen; i++) {
+          if (i === dataLen || data[i] === '\\n') {
+            if (i > lineStart) {
+              const line = data.substring(lineStart, i);
+              lineCount++;
+
+              if (line.length < 5000000) {  // Skip extremely large lines > 5MB
+                try {
+                  // Quick extraction of key fields without full parse for very large lines
+                  let uuid = null, parentUuid = null, type = null, timestamp = null;
+
+                  // Extract type first
+                  const typeMatch = line.match(/"type"\\s*:\\s*"([^"]+)"/);
+                  if (typeMatch) type = typeMatch[1];
+
+                  if (type === 'file-history-snapshot') {
+                    // Handle snapshot id mapping
+                    const msgIdMatch = line.match(/"messageId"\\s*:\\s*"([^"]+)"/);
+                    const snapMsgIdMatch = line.match(/"snapshot"\\s*:\\s*\\{[^}]*"messageId"\\s*:\\s*"([^"]+)"/);
+                    if (msgIdMatch && snapMsgIdMatch) {
+                      snapshotIdMap.set(msgIdMatch[1], snapMsgIdMatch[1]);
+                    }
+                  } else if (type === 'summary') {
+                    const uuidMatch = line.match(/"uuid"\\s*:\\s*"([^"]+)"/);
+                    if (uuidMatch) {
+                      summaryUuids.push(uuidMatch[1]);
+                      typeMap.set(uuidMatch[1], 'summary');
+                    }
+                  } else {
+                    // Extract uuid and parentUuid
+                    const uuidMatch = line.match(/"uuid"\\s*:\\s*"([^"]+)"/);
+                    const parentMatch = line.match(/"parentUuid"\\s*:\\s*"([^"]+)"/);
+                    const tsMatch = line.match(/"timestamp"\\s*:\\s*"([^"]+)"/);
+
+                    if (uuidMatch) {
+                      uuid = uuidMatch[1];
+                      parentUuid = parentMatch ? parentMatch[1] : null;
+                      timestamp = tsMatch ? tsMatch[1] : null;
+
+                      if (parentUuid && snapshotIdMap.has(parentUuid)) {
+                        parentUuid = snapshotIdMap.get(parentUuid);
+                      }
+
+                      parentMap.set(uuid, parentUuid);
+                      if (timestamp) timestampMap.set(uuid, timestamp);
+                      if (type) typeMap.set(uuid, type);
+                    }
+                  }
+                } catch {}
+              }
+
+              if (lineCount % 500 === 0) {
+                self.postMessage({ type: 'progress', message: 'Scanned ' + lineCount + ' lines...' });
+              }
+            }
+            lineStart = i + 1;
+          }
+        }
+
+        self.postMessage({ type: 'progress', message: 'Building tree structure from ' + parentMap.size + ' messages...' });
+
+        // Build tree structure using only the maps
+        const rootCache = new Map();
+        const getRoot = (uuid) => {
+          if (rootCache.has(uuid)) return rootCache.get(uuid);
+          let current = uuid;
+          const path = [];
+          while (current && parentMap.has(current)) {
+            if (path.length > 10000) break;
+            path.push(current);
+            const parent = parentMap.get(current);
+            if (!parent || !parentMap.has(parent)) {
+              for (const p of path) rootCache.set(p, current);
+              return current;
+            }
+            current = parent;
+          }
+          const result = path.length > 0 ? path[path.length - 1] : null;
+          for (const p of path) rootCache.set(p, result);
+          return result;
+        };
+
+        // Find leaves (uuids that are not parents of anyone)
+        const allParents = new Set(parentMap.values());
+        const leaves = [];
+        for (const uuid of parentMap.keys()) {
+          if (!allParents.has(uuid)) leaves.push(uuid);
+        }
+
+        // Group leaves by root
+        const leavesByRoot = new Map();
+        for (const leaf of leaves) {
+          const root = getRoot(leaf);
+          if (root) {
+            if (!leavesByRoot.has(root)) leavesByRoot.set(root, []);
+            leavesByRoot.get(root).push(leaf);
+          }
+        }
+
+        // Sort roots by latest timestamp
+        const rootTimestamps = [];
+        for (const [root, rootLeaves] of leavesByRoot) {
+          let latest = '';
+          for (const leaf of rootLeaves) {
+            const ts = timestampMap.get(leaf) || '';
+            if (ts > latest) latest = ts;
+          }
+          rootTimestamps.push([root, latest]);
+        }
+        rootTimestamps.sort((a, b) => a[1].localeCompare(b[1]));
+
+        self.postMessage({ type: 'progress', message: 'Processing ' + rootTimestamps.length + ' conversation trees...' });
+
+        // Second pass: process and save messages
+        let currentChunk = [];
+        let chunkIndex = 0;
+        let totalMessages = 0;
+
+        const saveCurrentChunk = async () => {
+          if (currentChunk.length > 0) {
+            await saveChunk(sessionId, chunkIndex, currentChunk);
+            chunkIndex++;
+            currentChunk = [];
+          }
+        };
+
+        // Build uuid to line position map for quick lookup
+        const uuidPositions = new Map();
+        lineStart = 0;
+        for (let i = 0; i <= dataLen; i++) {
+          if (i === dataLen || data[i] === '\\n') {
+            if (i > lineStart) {
+              const lineEnd = i;
+              const lineLen = lineEnd - lineStart;
+              // Search for uuid - check beginning first, then end of line
+              // uuid is typically near the end of the JSON object
+              let sample = data.substring(lineStart, Math.min(lineStart + 500, lineEnd));
+              let uuidMatch = sample.match(/"uuid"\\s*:\\s*"([^"]+)"/);
+
+              if (!uuidMatch && lineLen > 500) {
+                // Try the last 500 chars
+                sample = data.substring(Math.max(lineStart, lineEnd - 500), lineEnd);
+                uuidMatch = sample.match(/"uuid"\\s*:\\s*"([^"]+)"/);
+              }
+
+              if (uuidMatch) {
+                uuidPositions.set(uuidMatch[1], [lineStart, lineEnd]);
+              }
+            }
+            lineStart = i + 1;
+          }
+        }
+
+        const toolUseMap = new Map();
+        const messageTypes = [];  // Store type info for minimap
+
+        const parseAndProcessLine = (start, end) => {
+          const line = data.substring(start, end);
+          if (line.length > 5000000) return [];  // Skip > 5MB lines
+
+          try {
+            const obj = JSON.parse(line);
+            return processRawMessage(obj, toolUseMap);
+          } catch (e) {
+            return [];
+          }
+        };
+
+        const addMessage = async (msg) => {
+          currentChunk.push(msg);
+          // Record type for minimap: h=human, a=assistant, c=tool_call, r=tool_result, s=separator, y=system
+          const typeChar = msg.displayType === 'human' ? 'h' :
+                          msg.displayType === 'assistant' ? 'a' :
+                          msg.displayType === 'tool_call' ? 'c' :
+                          msg.displayType === 'tool_result' ? 'r' :
+                          msg.displayType === 'tree-separator' ? 's' :
+                          msg.displayType === 'system' ? 'y' : 'a';
+          messageTypes.push(typeChar);
+          totalMessages++;
+          if (currentChunk.length >= CHUNK_SIZE) {
+            await saveCurrentChunk();
+            if (totalMessages % 500 === 0) {
+              self.postMessage({ type: 'progress', message: 'Saved ' + totalMessages + ' messages...' });
+            }
+          }
+        };
+
+        // Process each tree
+        let treeIndex = 0;
+        const processedUuids = new Set();
+
+        for (const [root, _] of rootTimestamps) {
+          const rootLeaves = leavesByRoot.get(root) || [];
+
+          // Find the leaf with latest timestamp
+          let currentLeaf = null;
+          let latestTs = '';
+          for (const leaf of rootLeaves) {
+            const ts = timestampMap.get(leaf) || '';
+            if (ts > latestTs) {
+              latestTs = ts;
+              currentLeaf = leaf;
+            }
+          }
+
+          if (!currentLeaf) continue;
+
+          // Build chain from leaf to root
+          const chain = [];
+          let current = currentLeaf;
+          const visited = new Set();
+          while (current && !visited.has(current)) {
+            visited.add(current);
+            chain.unshift(current);
+            current = parentMap.get(current);
+            if (chain.length > 50000) break;
+          }
+
+          treeIndex++;
+          if (treeIndex > 1 || rootTimestamps.length > 1) {
+            await addMessage({
+              displayType: 'tree-separator',
+              blocks: [],
+              treeIndex: treeIndex,
+              treeSummaryCount: 0,
+              treeTimestamp: latestTs
+            });
+          }
+
+          // Process each message in chain
+          for (const uuid of chain) {
+            if (processedUuids.has(uuid)) continue;
+            processedUuids.add(uuid);
+
+            const pos = uuidPositions.get(uuid);
+            if (pos) {
+              const msgs = parseAndProcessLine(pos[0], pos[1]);
+              for (const m of msgs) await addMessage(m);
+            }
+          }
+        }
+
+        // Save final chunk
+        await saveCurrentChunk();
+
+        // Save metadata with type string for minimap
+        const typeString = messageTypes.join('');
+        await saveMeta({
+          sessionId: sessionId,
+          totalMessages: totalMessages,
+          totalChunks: chunkIndex,
+          processedAt: Date.now(),
+          dataHash: dataHash,
+          typeString: typeString
+        });
+
+        self.postMessage({ type: 'progress', message: 'Done! ' + totalMessages + ' messages saved' });
+        self.postMessage({ type: 'done', totalMessages: totalMessages, totalChunks: chunkIndex, typeString: typeString });
+
+      } catch (err) {
+        self.postMessage({ type: 'error', message: 'Error: ' + err.message + ' at ' + err.stack });
+      }
+    };
+  `;
+
+  const blob = new Blob([workerCode], { type: 'application/javascript' })
+  const url = URL.createObjectURL(blob)
+  return new Worker(url)
 }
 
 function formatDateTime(dateStr: string): string {
@@ -200,63 +595,19 @@ function formatDateTime(dateStr: string): string {
   })
 }
 
-// ========== Tool display components (same as SessionDetail) ==========
+// Tool display components
 function ToolCallDisplay({ name, input }: { name: string; input: Record<string, unknown> }) {
   const [isExpanded, setIsExpanded] = useState(false)
-
-  const formatInputForDisplay = (obj: Record<string, unknown>, indent = 0): string => {
-    const spaces = '  '.repeat(indent)
-    const lines: string[] = ['{']
-    const entries = Object.entries(obj)
-
-    entries.forEach(([key, value], idx) => {
-      const comma = idx < entries.length - 1 ? ',' : ''
-      const keyStr = `${spaces}  "${key}": `
-
-      if (typeof value === 'string') {
-        if (value.includes('\n') || value.length > 80) {
-          lines.push(`${keyStr}`)
-          lines.push(`${spaces}    \`\`\``)
-          lines.push(value)
-          lines.push(`${spaces}    \`\`\`${comma}`)
-        } else {
-          lines.push(`${keyStr}"${value}"${comma}`)
-        }
-      } else if (value === null) {
-        lines.push(`${keyStr}null${comma}`)
-      } else if (typeof value === 'boolean' || typeof value === 'number') {
-        lines.push(`${keyStr}${value}${comma}`)
-      } else if (Array.isArray(value)) {
-        lines.push(`${keyStr}${JSON.stringify(value, null, 2).split('\n').join('\n' + spaces + '  ')}${comma}`)
-      } else if (typeof value === 'object') {
-        lines.push(`${keyStr}${JSON.stringify(value, null, 2).split('\n').join('\n' + spaces + '  ')}${comma}`)
-      } else {
-        lines.push(`${keyStr}${JSON.stringify(value)}${comma}`)
-      }
-    })
-
-    lines.push(`${spaces}}`)
-    return lines.join('\n')
-  }
-
-  const inputStr = formatInputForDisplay(input)
 
   const getInputPreview = () => {
     if (input.command) return String(input.command).slice(0, 60).replace(/\n/g, ' ')
     if (input.file_path) return String(input.file_path)
     if (input.pattern) return `pattern: ${input.pattern}`
     if (input.query) return String(input.query).slice(0, 60).replace(/\n/g, ' ')
-    if (input.content) return `${String(input.content).slice(0, 40).replace(/\n/g, ' ')}...`
-    if (input.prompt) return String(input.prompt).slice(0, 60).replace(/\n/g, ' ')
     const firstKey = Object.keys(input)[0]
-    if (firstKey) {
-      const val = String(input[firstKey]).slice(0, 50).replace(/\n/g, ' ')
-      return `${firstKey}: ${val}`
-    }
+    if (firstKey) return `${firstKey}: ${String(input[firstKey]).slice(0, 50).replace(/\n/g, ' ')}`
     return ''
   }
-
-  const preview = getInputPreview()
 
   return (
     <div className="tool-call-block">
@@ -264,10 +615,10 @@ function ToolCallDisplay({ name, input }: { name: string; input: Record<string, 
         <span className="tool-call-arrow">→</span>
         <span className="tool-call-label">Tool Call</span>
         <span className="tool-call-name">{name}</span>
-        {preview && !isExpanded && <span className="tool-call-preview">{preview}</span>}
+        {!isExpanded && <span className="tool-call-preview">{getInputPreview()}</span>}
         <span className="tool-call-expand">{isExpanded ? '▲' : '▼'}</span>
       </div>
-      {isExpanded && <pre className="tool-call-input">{inputStr}</pre>}
+      {isExpanded && <pre className="tool-call-input">{JSON.stringify(input, null, 2)}</pre>}
     </div>
   )
 }
@@ -276,11 +627,11 @@ function ToolResultDisplay({ content, is_error, toolName }: { content: string; i
   const [isExpanded, setIsExpanded] = useState(false)
   const lines = content.split('\n')
   const previewLines = lines.slice(0, 3).join('\n')
-  const hasMore = lines.length > 3 || content.length > 200
+  const hasMore = lines.length > 3
 
   return (
     <div className={`tool-result-block ${is_error ? 'error' : ''}`}>
-      <div className="tool-result-header" onClick={() => setIsExpanded(!isExpanded)} style={{ cursor: 'pointer' }}>
+      <div className="tool-result-header" onClick={() => setIsExpanded(!isExpanded)}>
         <span className="tool-result-arrow">←</span>
         <span className="tool-result-label">{is_error ? 'Error' : 'Result'}</span>
         {toolName && <span className="tool-result-from">from {toolName}</span>}
@@ -295,191 +646,18 @@ function ToolResultDisplay({ content, is_error, toolName }: { content: string; i
   )
 }
 
-function SystemDisplay({ raw }: { raw?: Record<string, unknown> }) {
-  const [isExpanded, setIsExpanded] = useState(false)
-  const subtype = (raw?.subtype as string) || (raw?.type as string) || 'system'
-
+function SystemDisplay() {
   return (
     <div className="system-block">
-      <div className="system-block-header" onClick={() => setIsExpanded(!isExpanded)}>
+      <div className="system-block-header">
         <span className="system-block-icon">⚙</span>
         <span className="system-block-label">System</span>
-        <span className="system-block-subtype">{subtype}</span>
-        <span className="system-block-expand">{isExpanded ? '▲' : '▼'}</span>
       </div>
-      {isExpanded && raw && <pre className="system-block-content">{JSON.stringify(raw, null, 2)}</pre>}
     </div>
   )
 }
 
-// ========== MiniMap component (same as SessionDetail) ==========
-interface MiniMapItem {
-  type: DisplayType
-  index: number
-  heightRatio: number
-}
-
-function MiniMap({
-  items,
-  visibleStart,
-  visibleEnd,
-  onNavigate
-}: {
-  items: MiniMapItem[]
-  visibleStart: number
-  visibleEnd: number
-  onNavigate: (ratio: number) => void
-}) {
-  const minimapRef = useRef<HTMLDivElement>(null)
-  const contentRef = useRef<HTMLDivElement>(null)
-  const isDragging = useRef(false)
-  const isResizing = useRef(false)
-  const isMoving = useRef(false)
-  const dragOffset = useRef({ x: 0, y: 0 })
-  const [, forceUpdate] = useState(0)
-
-  const [position, setPosition] = useState(() => {
-    const saved = localStorage.getItem('minimap-position')
-    return saved ? JSON.parse(saved) : { top: 200, right: 24 }
-  })
-  const [height, setHeight] = useState(() => {
-    const saved = localStorage.getItem('minimap-height')
-    return saved ? parseInt(saved) : 500
-  })
-
-  useEffect(() => {
-    localStorage.setItem('minimap-position', JSON.stringify(position))
-  }, [position])
-
-  useEffect(() => {
-    localStorage.setItem('minimap-height', String(height))
-  }, [height])
-
-  const handleMouseDown = useCallback((e: React.MouseEvent) => {
-    const target = e.target as HTMLElement
-    if (target.classList.contains('minimap-resize-handle')) {
-      isResizing.current = true
-      e.preventDefault()
-      return
-    }
-    if (target.classList.contains('minimap-move-handle')) {
-      isMoving.current = true
-      if (minimapRef.current) {
-        const rect = minimapRef.current.getBoundingClientRect()
-        dragOffset.current = { x: e.clientX - rect.left, y: e.clientY - rect.top }
-      }
-      e.preventDefault()
-      return
-    }
-    isDragging.current = true
-    handleNavigateClick(e)
-  }, [])
-
-  const handleNavigateClick = useCallback((e: React.MouseEvent) => {
-    if (!contentRef.current) return
-    const rect = contentRef.current.getBoundingClientRect()
-    const y = e.clientY - rect.top
-    const ratio = Math.max(0, Math.min(1, y / rect.height))
-    onNavigate(ratio)
-  }, [onNavigate])
-
-  const handleMouseMove = useCallback((e: React.MouseEvent) => {
-    if (isResizing.current) {
-      if (!minimapRef.current) return
-      const rect = minimapRef.current.getBoundingClientRect()
-      const newHeight = Math.max(100, Math.min(window.innerHeight - 50, e.clientY - rect.top))
-      setHeight(newHeight)
-      return
-    }
-    if (isMoving.current) {
-      const newTop = e.clientY - dragOffset.current.y
-      const newRight = window.innerWidth - e.clientX - (60 - dragOffset.current.x)
-      setPosition({
-        top: Math.max(50, Math.min(window.innerHeight - 200, newTop)),
-        right: Math.max(10, Math.min(window.innerWidth - 100, newRight))
-      })
-      return
-    }
-    if (isDragging.current) {
-      handleNavigateClick(e)
-    }
-  }, [handleNavigateClick])
-
-  useEffect(() => {
-    const handleGlobalMouseUp = () => {
-      isDragging.current = false
-      isResizing.current = false
-      isMoving.current = false
-    }
-    const handleGlobalMouseMove = (e: MouseEvent) => {
-      if (isResizing.current && minimapRef.current) {
-        const rect = minimapRef.current.getBoundingClientRect()
-        const newHeight = Math.max(100, Math.min(window.innerHeight - 50, e.clientY - rect.top))
-        setHeight(newHeight)
-      }
-      if (isMoving.current) {
-        const newTop = e.clientY - dragOffset.current.y
-        const newRight = window.innerWidth - e.clientX - (60 - dragOffset.current.x)
-        setPosition({
-          top: Math.max(50, Math.min(window.innerHeight - 200, newTop)),
-          right: Math.max(10, Math.min(window.innerWidth - 100, newRight))
-        })
-      }
-    }
-    window.addEventListener('mouseup', handleGlobalMouseUp)
-    window.addEventListener('mousemove', handleGlobalMouseMove)
-    return () => {
-      window.removeEventListener('mouseup', handleGlobalMouseUp)
-      window.removeEventListener('mousemove', handleGlobalMouseMove)
-    }
-  }, [])
-
-  useEffect(() => {
-    forceUpdate(n => n + 1)
-  }, [height])
-
-  const [contentRect, setContentRect] = useState({ top: 20, height: height - 40 })
-
-  useEffect(() => {
-    if (contentRef.current) {
-      const updateRect = () => {
-        const rect = contentRef.current?.getBoundingClientRect()
-        const parentRect = minimapRef.current?.getBoundingClientRect()
-        if (rect && parentRect) {
-          setContentRect({ top: rect.top - parentRect.top, height: rect.height })
-        }
-      }
-      updateRect()
-      const observer = new ResizeObserver(updateRect)
-      observer.observe(contentRef.current)
-      return () => observer.disconnect()
-    }
-  }, [height, items])
-
-  const viewportTop = contentRect.top + visibleStart * contentRect.height
-  const viewportHeight = (visibleEnd - visibleStart) * contentRect.height
-
-  return (
-    <div
-      className="minimap"
-      ref={minimapRef}
-      style={{ top: `${position.top}px`, right: `${position.right}px`, height: `${height}px`, maxHeight: 'none' }}
-      onMouseDown={handleMouseDown}
-      onMouseMove={handleMouseMove}
-    >
-      <div className="minimap-move-handle" title="Drag to move">⋮⋮</div>
-      <div className="minimap-content" ref={contentRef}>
-        {items.map((item, i) => (
-          <div key={i} className={`minimap-item minimap-${item.type}`} style={{ flex: `${item.heightRatio} 0 0` }} />
-        ))}
-      </div>
-      <div className="minimap-viewport" style={{ top: `${viewportTop}px`, height: `${viewportHeight}px` }} />
-      <div className="minimap-resize-handle" title="Drag to resize">═</div>
-    </div>
-  )
-}
-
-// ========== Session List View (similar to SessionList) ==========
+// Session List View
 function SessionListView({
   sessions,
   source,
@@ -541,7 +719,100 @@ function SessionListView({
   )
 }
 
-// ========== Session Detail View (same rendering as SessionDetail) ==========
+// Message Row Component
+function MessageRow({ msg }: { msg: DisplayMessage | null; index: number }) {
+  if (!msg) {
+    return <div className="message loading">Loading...</div>
+  }
+
+  if (msg.displayType === 'human') {
+    return (
+      <div className="message human">
+        <div className="message-role"><span className="role-icon">❯</span> Human</div>
+        <div className="message-content">
+          {msg.blocks.map((b, j) => b.type === 'text' ? <span key={j}>{b.content}</span> : null)}
+        </div>
+      </div>
+    )
+  }
+  if (msg.displayType === 'assistant') {
+    return (
+      <div className="message assistant">
+        <div className="message-role"><span className="role-icon">◆</span> Assistant</div>
+        <div className="message-content">
+          {msg.blocks.map((b, j) => b.type === 'text' ? <span key={j}>{b.content}</span> : null)}
+        </div>
+      </div>
+    )
+  }
+  if (msg.displayType === 'tool_call') {
+    const block = msg.blocks[0]
+    if (block?.type === 'tool_use') {
+      return <ToolCallDisplay name={block.name} input={block.input} />
+    }
+  }
+  if (msg.displayType === 'tool_result') {
+    const block = msg.blocks[0]
+    if (block?.type === 'tool_result') {
+      return <ToolResultDisplay content={block.content} is_error={block.is_error} toolName={msg.toolName} />
+    }
+  }
+  if (msg.displayType === 'tree-separator') {
+    const ts = msg.treeTimestamp ? formatDateTime(msg.treeTimestamp) : ''
+    const summaryInfo = msg.treeSummaryCount ? ` • ${msg.treeSummaryCount} compacted` : ''
+    return (
+      <div className="tree-separator">
+        <div className="tree-separator-line" />
+        <div className="tree-separator-label">
+          Conversation {msg.treeIndex}{summaryInfo} • {ts}
+        </div>
+        <div className="tree-separator-line" />
+      </div>
+    )
+  }
+  if (msg.displayType === 'system') {
+    return <SystemDisplay />
+  }
+  return null
+}
+
+// Estimate message height based on type char (from typeString)
+function estimateHeightByType(typeChar: string): number {
+  switch (typeChar) {
+    case 'h': return 80   // human
+    case 'a': return 150  // assistant
+    case 'c': return 50   // tool_call
+    case 'r': return 80   // tool_result
+    case 's': return 40   // tree-separator
+    case 'y': return 40   // system
+    default: return 60
+  }
+}
+
+// Estimate message height from actual message content
+function estimateMessageHeight(msg: DisplayMessage | null, typeChar?: string): number {
+  if (!msg) {
+    // Use typeChar if available, otherwise default
+    return typeChar ? estimateHeightByType(typeChar) : 60
+  }
+  switch (msg.displayType) {
+    case 'human': {
+      const textLen = msg.blocks.reduce((acc, b) => acc + (b.type === 'text' ? b.content.length : 0), 0)
+      return Math.max(60, Math.min(400, 60 + Math.floor(textLen / 80) * 20))
+    }
+    case 'assistant': {
+      const textLen = msg.blocks.reduce((acc, b) => acc + (b.type === 'text' ? b.content.length : 0), 0)
+      return Math.max(60, Math.min(600, 60 + Math.floor(textLen / 80) * 20))
+    }
+    case 'tool_call': return 50
+    case 'tool_result': return 80
+    case 'tree-separator': return 40
+    case 'system': return 40
+    default: return 60
+  }
+}
+
+// Session Detail View with IndexedDB-backed virtual scrolling
 function SessionDetailView({
   session,
   source,
@@ -551,95 +822,263 @@ function SessionDetailView({
   source: { machineName: string; originalPath: string }
   onBack: () => void
 }) {
-  const [messages, setMessages] = useState<DisplayMessage[]>([])
-  const conversationRef = useRef<HTMLDivElement>(null)
+  const [isLoading, setIsLoading] = useState(true)
+  const [loadingProgress, setLoadingProgress] = useState('')
+  const [totalMessages, setTotalMessages] = useState(0)
+  const [typeString, setTypeString] = useState('')  // For minimap colors
+  const [visibleMessages, setVisibleMessages] = useState<Map<number, DisplayMessage>>(new Map())
   const [visibleStart, setVisibleStart] = useState(0)
   const [visibleEnd, setVisibleEnd] = useState(1)
-  const [minimapItems, setMinimapItems] = useState<MiniMapItem[]>([])
+  const parentRef = useRef<HTMLDivElement>(null)
+  const cacheRef = useRef<MessageCache | null>(null)
 
+  // Initialize and parse session data
   useEffect(() => {
-    setMessages(parseMessages(session.data))
+    let cancelled = false
+    const sessionId = session.id
+    const dataHash = hashString(session.data)
+
+    async function init() {
+      setIsLoading(true)
+      setLoadingProgress('Checking cache...')
+
+      // Check if already cached
+      const cached = await isSessionCached(sessionId, dataHash)
+      if (cached && !cancelled) {
+        const meta = await getSessionMeta(sessionId)
+        if (meta) {
+          const ts = (meta as { typeString?: string }).typeString || ''
+          // If typeString is missing, need to re-parse
+          if (ts.length > 0) {
+            setTotalMessages(meta.totalMessages)
+            setTypeString(ts)
+            cacheRef.current = new MessageCache(sessionId)
+            // Preload all messages into memory for fast scrolling
+            setLoadingProgress('Loading messages into memory...')
+            await cacheRef.current.prefetch(Math.floor(meta.totalMessages / 2), meta.totalMessages)
+            setIsLoading(false)
+            return
+          }
+        }
+      }
+
+      // Need to parse - use worker
+      setLoadingProgress('Starting parser...')
+      const worker = createParserWorker()
+
+      worker.onmessage = async (e) => {
+        if (cancelled) return
+
+        const { type, message, totalMessages: total, typeString: ts } = e.data
+        if (type === 'progress') {
+          setLoadingProgress(message)
+        } else if (type === 'done') {
+          worker.terminate()
+          setTotalMessages(total)
+          setTypeString(ts || '')
+          cacheRef.current = new MessageCache(sessionId)
+          // Preload all messages into memory for fast scrolling
+          setLoadingProgress('Loading messages into memory...')
+          await cacheRef.current.prefetch(Math.floor(total / 2), total)
+          setIsLoading(false)
+        } else if (type === 'error') {
+          worker.terminate()
+          setLoadingProgress('Error: ' + message)
+        }
+      }
+
+      worker.onerror = (err) => {
+        worker.terminate()
+        setLoadingProgress('Worker error: ' + err.message)
+      }
+
+      worker.postMessage({ data: session.data, sessionId, dataHash })
+    }
+
+    init()
+
+    return () => {
+      cancelled = true
+      cacheRef.current?.clear()
+    }
   }, [session])
 
-  // Measure actual message heights after render
+  // Virtualizer
+  const virtualizer = useVirtualizer({
+    count: totalMessages,
+    getScrollElement: () => parentRef.current,
+    estimateSize: (index) => estimateMessageHeight(visibleMessages.get(index) || null, typeString[index]),
+    overscan: 20,
+  })
+
+  // Load visible messages from IndexedDB
   useEffect(() => {
-    if (!conversationRef.current || messages.length === 0) return
+    if (isLoading || totalMessages === 0 || !cacheRef.current) return
 
-    const measureHeights = () => {
-      if (!conversationRef.current) return
+    const range = virtualizer.range
+    if (!range) return
 
-      const container = conversationRef.current
-      const children = container.children
-      const containerTop = container.getBoundingClientRect().top + window.scrollY
-      const totalHeight = container.scrollHeight
+    const start = Math.max(0, range.startIndex - 50)
+    const end = Math.min(totalMessages - 1, range.endIndex + 50)
 
-      if (totalHeight <= 0 || children.length === 0) return
-
-      const items: MiniMapItem[] = []
-      for (let i = 0; i < children.length && i < messages.length; i++) {
-        const child = children[i] as HTMLElement
-        const childRect = child.getBoundingClientRect()
-        const childTop = childRect.top + window.scrollY - containerTop
-        const nextChildTop = i < children.length - 1
-          ? (children[i + 1] as HTMLElement).getBoundingClientRect().top + window.scrollY - containerTop
-          : totalHeight
-        const heightWithGap = nextChildTop - childTop
-        const ratio = heightWithGap / totalHeight
-
-        items.push({ type: messages[i].displayType, index: i, heightRatio: ratio })
+    // Prefetch and update visible messages
+    cacheRef.current.prefetch(Math.floor((start + end) / 2), totalMessages).then(() => {
+      const newVisible = new Map<number, DisplayMessage>()
+      for (let i = start; i <= end; i++) {
+        const msg = cacheRef.current?.getIfCached(i)
+        if (msg) newVisible.set(i, msg)
       }
-      setMinimapItems(items)
+      setVisibleMessages(newVisible)
+    })
+
+    // Update minimap range based on visible message indices
+    // Use message index ratio for consistency with separator positions
+    if (totalMessages > 0) {
+      setVisibleStart(range.startIndex / totalMessages)
+      setVisibleEnd(Math.min(1, (range.endIndex + 1) / totalMessages))
+    }
+  }, [virtualizer.range, isLoading, totalMessages])
+
+  // Minimap items - use uniform height ratios based on message count
+  // This ensures consistency with how visibleStart/visibleEnd and separator positions are calculated
+  const minimapItems = useMemo<MiniMapItem[]>(() => {
+    if (totalMessages === 0 || !typeString) return []
+
+    // Map type chars to display types
+    const charToType: Record<string, string> = {
+      'h': 'human',
+      'a': 'assistant',
+      'c': 'tool_call',
+      'r': 'tool_result',
+      's': 'tree-separator',
+      'y': 'system'
     }
 
-    const timer = setTimeout(measureHeights, 100)
-    const resizeObserver = new ResizeObserver(measureHeights)
-    resizeObserver.observe(conversationRef.current)
+    const items: MiniMapItem[] = []
+    let treeIdx = 0
+    for (let i = 0; i < totalMessages; i++) {
+      const typeChar = typeString[i] || 'a'
+      const displayType = charToType[typeChar] || 'assistant'
+      if (displayType === 'tree-separator') treeIdx++
 
-    return () => {
-      clearTimeout(timer)
-      resizeObserver.disconnect()
+      items.push({
+        type: displayType,
+        index: i,
+        heightRatio: 1 / totalMessages,
+        treeIndex: displayType === 'tree-separator' ? treeIdx : undefined
+      })
     }
-  }, [messages])
+    return items
+  }, [totalMessages, typeString])
 
-  const handleScroll = useCallback(() => {
-    if (!conversationRef.current) return
+  // Calculate separator positions based on message index ratio
+  // This matches how visibleStart/visibleEnd are calculated
+  const separatorPositions = useMemo<SeparatorPosition[]>(() => {
+    if (!typeString || totalMessages === 0) return []
 
-    const rect = conversationRef.current.getBoundingClientRect()
-    const conversationHeight = conversationRef.current.scrollHeight
-    const viewportHeight = window.innerHeight
+    const positions: SeparatorPosition[] = []
+    let treeIdx = 0
 
-    if (conversationHeight <= 0) return
+    for (let i = 0; i < typeString.length; i++) {
+      if (typeString[i] === 's') {
+        treeIdx++
+        // Position based on message index ratio (center of the separator message)
+        positions.push({
+          ratio: (i + 0.5) / totalMessages,
+          index: treeIdx
+        })
+      }
+    }
+    return positions
+  }, [typeString, totalMessages])
 
-    const visibleTop = Math.max(0, -rect.top)
-    const visibleBottom = Math.min(conversationHeight, Math.max(0, viewportHeight - rect.top))
-    const startRatio = visibleTop / conversationHeight
-    const endRatio = visibleBottom / conversationHeight
-
-    setVisibleStart(Math.max(0, Math.min(1, startRatio)))
-    setVisibleEnd(Math.max(0, Math.min(1, endRatio)))
-  }, [])
+  // Ref to track ongoing scroll target
+  const scrollTargetRef = useRef<number | null>(null)
 
   const handleMinimapNavigate = useCallback((ratio: number) => {
-    if (!conversationRef.current) return
+    if (!parentRef.current) return
 
-    const rect = conversationRef.current.getBoundingClientRect()
-    const conversationHeight = conversationRef.current.scrollHeight
-    const targetOffset = ratio * conversationHeight
-    const currentTop = window.scrollY + rect.top
-    const targetScroll = currentTop + targetOffset - window.innerHeight / 3
+    // ratio is message index ratio, convert to target message index
+    const targetIndex = Math.floor(ratio * totalMessages)
 
-    window.scrollTo({ top: Math.max(0, targetScroll), behavior: 'auto' })
-  }, [])
+    // Save target for continuous scrolling
+    scrollTargetRef.current = ratio
 
-  useEffect(() => {
-    window.addEventListener('scroll', handleScroll)
-    window.addEventListener('resize', handleScroll)
-    handleScroll()
-    return () => {
-      window.removeEventListener('scroll', handleScroll)
-      window.removeEventListener('resize', handleScroll)
+    // Function to scroll to target index
+    const scrollToTarget = () => {
+      // Check if this scroll target is still valid
+      if (scrollTargetRef.current !== ratio) return
+      if (!parentRef.current) return
+
+      // Use virtualizer to scroll to the target index
+      virtualizer.scrollToIndex(targetIndex, { align: 'start' })
+
+      // Check if we need to keep adjusting
+      const range = virtualizer.range
+      if (range && Math.abs(range.startIndex - targetIndex) > 2) {
+        requestAnimationFrame(scrollToTarget)
+      }
     }
-  }, [handleScroll, messages])
+
+    // Start scrolling
+    scrollToTarget()
+
+    // Prefetch messages around target
+    if (cacheRef.current) {
+      cacheRef.current.prefetch(targetIndex, totalMessages)
+    }
+  }, [totalMessages, virtualizer])
+
+  // Loading state
+  if (isLoading) {
+    return (
+      <>
+        <button onClick={onBack} className="back-link" style={{ background: 'none', border: 'none', padding: 0 }}>
+          Back to session list
+        </button>
+
+        <div className="detail-header">
+          <h1>{session.id}</h1>
+          <div className="detail-meta">
+            <span>{session.lineCount} lines</span>
+            <span>Modified: {formatDateTime(session.modifiedAt)}</span>
+            <span>Source: {source.machineName}</span>
+          </div>
+        </div>
+
+        <div className="section conversation-section">
+          <h2>Conversation</h2>
+          <div className="loading-container" style={{
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '60px 20px',
+            color: 'var(--text-secondary)'
+          }}>
+            <div className="loading-spinner" style={{
+              width: '40px',
+              height: '40px',
+              border: '3px solid var(--border)',
+              borderTopColor: 'var(--accent)',
+              borderRadius: '50%',
+              animation: 'spin 1s linear infinite',
+              marginBottom: '16px'
+            }} />
+            <div style={{ fontSize: '14px' }}>{loadingProgress}</div>
+            <style>{`
+              @keyframes spin {
+                to { transform: rotate(360deg); }
+              }
+            `}</style>
+          </div>
+        </div>
+      </>
+    )
+  }
+
+  const virtualItems = virtualizer.getVirtualItems()
+  const totalSize = virtualizer.getTotalSize()
 
   return (
     <>
@@ -651,6 +1090,7 @@ function SessionDetailView({
         <h1>{session.id}</h1>
         <div className="detail-meta">
           <span>{session.lineCount} lines</span>
+          <span>{totalMessages} messages</span>
           <span>Modified: {formatDateTime(session.modifiedAt)}</span>
           <span>Source: {source.machineName}</span>
         </div>
@@ -659,56 +1099,52 @@ function SessionDetailView({
       <div className="section conversation-section">
         <h2>Conversation</h2>
         <div className="conversation-container">
-          <div className="conversation-flow" ref={conversationRef}>
-            {messages.length === 0 ? (
+          <div
+            className="conversation-flow virtual-scroll-container"
+            ref={parentRef}
+            style={{
+              height: 'calc(100vh - 200px)',
+              overflow: 'auto',
+              contain: 'strict',
+              scrollbarWidth: 'none',  // Firefox
+              msOverflowStyle: 'none', // IE/Edge
+              scrollBehavior: 'auto',  // Disable smooth scrolling
+            }}
+          >
+            {totalMessages === 0 ? (
               <div className="empty-conversation">No conversation data to display</div>
             ) : (
-              messages.map((msg, i) => {
-                if (msg.displayType === 'human') {
+              <div style={{ height: `${totalSize}px`, width: '100%', position: 'relative' }}>
+                {virtualItems.map((virtualRow) => {
+                  const msg = visibleMessages.get(virtualRow.index) || null
                   return (
-                    <div key={i} className="message human">
-                      <div className="message-role"><span className="role-icon">❯</span> Human</div>
-                      <div className="message-content">
-                        {msg.blocks.map((b, j) => b.type === 'text' ? <span key={j}>{b.content}</span> : null)}
-                      </div>
+                    <div
+                      key={virtualRow.key}
+                      data-index={virtualRow.index}
+                      ref={virtualizer.measureElement}
+                      style={{
+                        position: 'absolute',
+                        top: 0,
+                        left: 0,
+                        width: '100%',
+                        transform: `translateY(${virtualRow.start}px)`,
+                      }}
+                    >
+                      <MessageRow msg={msg} index={virtualRow.index} />
                     </div>
                   )
-                }
-                if (msg.displayType === 'assistant') {
-                  return (
-                    <div key={i} className="message assistant">
-                      <div className="message-role"><span className="role-icon">◆</span> Assistant</div>
-                      <div className="message-content">
-                        {msg.blocks.map((b, j) => b.type === 'text' ? <span key={j}>{b.content}</span> : null)}
-                      </div>
-                    </div>
-                  )
-                }
-                if (msg.displayType === 'tool_call') {
-                  const block = msg.blocks[0]
-                  if (block?.type === 'tool_use') {
-                    return <ToolCallDisplay key={i} name={block.name} input={block.input} />
-                  }
-                }
-                if (msg.displayType === 'tool_result') {
-                  const block = msg.blocks[0]
-                  if (block?.type === 'tool_result') {
-                    return <ToolResultDisplay key={i} content={block.content} is_error={block.is_error} toolName={msg.toolName} />
-                  }
-                }
-                if (msg.displayType === 'system') {
-                  return <SystemDisplay key={i} raw={msg.raw} />
-                }
-                return null
-              })
+                })}
+              </div>
             )}
           </div>
-          {messages.length > 0 && (
+          {totalMessages > 0 && (
             <MiniMap
               items={minimapItems}
               visibleStart={visibleStart}
               visibleEnd={visibleEnd}
               onNavigate={handleMinimapNavigate}
+              totalMessages={totalMessages}
+              separatorPositions={separatorPositions}
             />
           )}
         </div>
@@ -717,14 +1153,14 @@ function SessionDetailView({
   )
 }
 
-// ========== Main RoamPreviewCore component ==========
+// Main RoamPreviewCore component
 interface RoamPreviewCoreProps {
   bundle: RoamBundle
   sessions: RoamSession[]
 }
 
 function RoamPreviewCore({ bundle, sessions }: RoamPreviewCoreProps) {
-  const [selectedSession, setSelectedSession] = useState<RoamSession | null>(null)
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null)
   const [minLines, setMinLines] = useState(() => {
     const saved = localStorage.getItem('minLines')
     return saved ? parseInt(saved) : 0
@@ -734,20 +1170,22 @@ function RoamPreviewCore({ bundle, sessions }: RoamPreviewCoreProps) {
     localStorage.setItem('minLines', String(minLines))
   }, [minLines])
 
-  // Viewing a specific session
+  const selectedSession = selectedSessionId
+    ? sessions.find(s => s.id === selectedSessionId) || null
+    : null
+
   if (selectedSession) {
     return (
       <div className="detail-page">
         <SessionDetailView
           session={selectedSession}
           source={bundle.source}
-          onBack={() => setSelectedSession(null)}
+          onBack={() => setSelectedSessionId(null)}
         />
       </div>
     )
   }
 
-  // Session list view
   return (
     <div className="detail-page">
       <SessionListView
@@ -755,7 +1193,7 @@ function RoamPreviewCore({ bundle, sessions }: RoamPreviewCoreProps) {
         source={bundle.source}
         minLines={minLines}
         onMinLinesChange={setMinLines}
-        onSelectSession={setSelectedSession}
+        onSelectSession={(session) => setSelectedSessionId(session.id)}
       />
     </div>
   )

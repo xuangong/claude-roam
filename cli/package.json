@@ -9,7 +9,7 @@
   },
   "scripts": {
     "build": "bun build src/index.ts --outdir dist --target bun",
-    "build:bin": "npm run build:preview && bun build src/index.ts --compile --outfile claude-roam",
+    "build:bin": "npm --prefix ../web run build && npm --prefix ../web run build:preview && bun build src/index.ts --compile --outfile claude-roam",
     "build:preview": "npm --prefix ../web run build:preview",
     "build:all": "npm run build:preview && npm run build:platforms",
     "build:platforms": "npm run build:macos-arm64 && npm run build:macos-x64 && npm run build:linux-x64 && npm run build:linux-arm64 && npm run build:windows-x64",
