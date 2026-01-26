@@ -15,6 +15,7 @@ interface MiniMapProps {
   totalMessages?: number  // For position indicator
   searchResults?: number[]  // Message indices with search matches
   currentSearchIndex?: number  // Currently focused search result
+  onSearchResultClick?: (searchIndex: number) => void  // Click handler for search result markers
 }
 
 export function MiniMap({
@@ -24,7 +25,8 @@ export function MiniMap({
   onNavigate,
   totalMessages = 0,
   searchResults = [],
-  currentSearchIndex = -1
+  currentSearchIndex = -1,
+  onSearchResultClick
 }: MiniMapProps) {
   const minimapRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
@@ -300,8 +302,15 @@ export function MiniMap({
                 key={i}
                 className={`minimap-search-marker ${isCurrent ? 'current' : ''}`}
                 style={{ top: `${ratio * contentRect.height}px` }}
-                onClick={(e) => { e.stopPropagation(); onNavigate(ratio) }}
-                title={`Search result ${i + 1}`}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  if (onSearchResultClick) {
+                    onSearchResultClick(i)
+                  } else {
+                    onNavigate(ratio)
+                  }
+                }}
+                title={`Search result ${i + 1} of ${searchResults.length}`}
               />
             )
           })}

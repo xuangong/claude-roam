@@ -435,12 +435,6 @@ function SessionDetail() {
   const [searchQuery, setSearchQuery] = useState('')
   const [currentSearchIndex, setCurrentSearchIndex] = useState(-1)
   const [showSearch, setShowSearch] = useState(false)
-  const [isImmersive, setIsImmersive] = useState(false)
-
-  // Toggle immersive mode
-  const toggleImmersive = useCallback(() => {
-    setIsImmersive(prev => !prev)
-  }, [])
 
   // Handle keyboard shortcuts
   useEffect(() => {
@@ -449,23 +443,10 @@ function SessionDetail() {
         e.preventDefault()
         setShowSearch(true)
       }
-      if (e.key === 'Escape' && !showSearch && isImmersive) {
-        setIsImmersive(false)
-      }
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [showSearch, isImmersive])
-
-  // Apply/remove immersive class to body
-  useEffect(() => {
-    if (isImmersive) {
-      document.body.classList.add('immersive-mode')
-    } else {
-      document.body.classList.remove('immersive-mode')
-    }
-    return () => document.body.classList.remove('immersive-mode')
-  }, [isImmersive])
+  }, [])
 
   // Search results - message indices with matches
   const searchResults = useMemo(() => {
@@ -514,6 +495,12 @@ function SessionDetail() {
     setSearchQuery('')
     setCurrentSearchIndex(-1)
   }, [])
+
+  // Handle click on search result marker in minimap
+  const handleSearchResultClick = useCallback((searchIndex: number) => {
+    setCurrentSearchIndex(searchIndex)
+    scrollToMessage(searchResults[searchIndex])
+  }, [searchResults, scrollToMessage])
 
   // Reset search index when query changes
   useEffect(() => {
@@ -706,21 +693,6 @@ function SessionDetail() {
           >
             🔍 Search
           </button>
-          <button
-            onClick={toggleImmersive}
-            style={{
-              padding: 'var(--space-1) var(--space-2)',
-              fontSize: '12px',
-              cursor: 'pointer',
-              background: 'var(--bg-tertiary)',
-              border: '1px solid var(--border-default)',
-              borderRadius: 'var(--radius-sm)',
-              color: 'var(--text-secondary)',
-            }}
-            title="Enter immersive mode"
-          >
-            ⛶ Immersive
-          </button>
         </div>
       </div>
 
@@ -735,11 +707,6 @@ function SessionDetail() {
           onClose={handleSearchClose}
         />
       )}
-
-      {/* Immersive mode exit hint */}
-      <div className="immersive-exit-hint" onClick={toggleImmersive}>
-        Press Esc or click to exit • Ctrl+F to search
-      </div>
 
       <div className="section">
         <h2>Source History</h2>
@@ -795,6 +762,7 @@ function SessionDetail() {
               totalMessages={messages.length}
               searchResults={searchResults}
               currentSearchIndex={currentSearchIndex}
+              onSearchResultClick={handleSearchResultClick}
             />
           )}
         </div>

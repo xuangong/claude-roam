@@ -749,14 +749,8 @@ function SessionDetailView({
   const [currentSearchIndex, setCurrentSearchIndex] = useState(-1)  // Current result being viewed
   const [refreshKey, setRefreshKey] = useState(0)  // For forcing re-parse
   const [showSearch, setShowSearch] = useState(false)  // Show floating search
-  const [isImmersive, setIsImmersive] = useState(false)  // Immersive mode
 
-  // Toggle immersive mode
-  const toggleImmersive = useCallback(() => {
-    setIsImmersive(prev => !prev)
-  }, [])
-
-  // Handle keyboard shortcuts for search and immersive mode
+  // Handle keyboard shortcuts for search
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       // Ctrl/Cmd + F to open search
@@ -764,24 +758,10 @@ function SessionDetailView({
         e.preventDefault()
         setShowSearch(true)
       }
-      // Escape to exit immersive mode (if search is not open)
-      if (e.key === 'Escape' && !showSearch && isImmersive) {
-        setIsImmersive(false)
-      }
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [showSearch, isImmersive])
-
-  // Apply/remove immersive class to body
-  useEffect(() => {
-    if (isImmersive) {
-      document.body.classList.add('immersive-mode')
-    } else {
-      document.body.classList.remove('immersive-mode')
-    }
-    return () => document.body.classList.remove('immersive-mode')
-  }, [isImmersive])
+  }, [])
 
   // Clear cache and refresh
   const handleRefreshCache = useCallback(async () => {
@@ -930,6 +910,12 @@ function SessionDetailView({
     setSearchResults([])
     setCurrentSearchIndex(-1)
   }, [])
+
+  // Handle click on search result marker in minimap
+  const handleSearchResultClick = useCallback((searchIndex: number) => {
+    setCurrentSearchIndex(searchIndex)
+    virtualizer.scrollToIndex(searchResults[searchIndex], { align: 'center' })
+  }, [searchResults, virtualizer])
 
   // Load visible messages from IndexedDB
   useEffect(() => {
@@ -1140,21 +1126,6 @@ function SessionDetailView({
             🔍 Search
           </button>
           <button
-            onClick={toggleImmersive}
-            style={{
-              padding: 'var(--space-1) var(--space-2)',
-              fontSize: '12px',
-              cursor: 'pointer',
-              background: 'var(--bg-tertiary)',
-              border: '1px solid var(--border-default)',
-              borderRadius: 'var(--radius-sm)',
-              color: 'var(--text-secondary)',
-            }}
-            title="Enter immersive mode"
-          >
-            ⛶ Immersive
-          </button>
-          <button
             onClick={handleRefreshCache}
             style={{
               marginLeft: 'auto',
@@ -1184,11 +1155,6 @@ function SessionDetailView({
           onClose={handleSearchClose}
         />
       )}
-
-      {/* Immersive mode exit hint */}
-      <div className="immersive-exit-hint" onClick={toggleImmersive}>
-        Press Esc or click to exit • Ctrl+F to search
-      </div>
 
       <div className="section conversation-section">
         <h2>Conversation</h2>
@@ -1244,6 +1210,7 @@ function SessionDetailView({
               totalMessages={totalMessages}
               searchResults={searchResults}
               currentSearchIndex={currentSearchIndex}
+              onSearchResultClick={handleSearchResultClick}
             />
           )}
         </div>
