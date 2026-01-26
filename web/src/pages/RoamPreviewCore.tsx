@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { MiniMap, type MiniMapItem } from '../components/MiniMap'
 import { MessageRow } from '../components/MessageComponents'
+import { FloatingSearch } from '../components/FloatingSearch'
 import type { DisplayMessage } from '../types/message'
 import { formatDateTime } from '../utils/format'
 import {
@@ -747,6 +748,40 @@ function SessionDetailView({
   const [searchResults, setSearchResults] = useState<number[]>([])  // Message indices with matches
   const [currentSearchIndex, setCurrentSearchIndex] = useState(-1)  // Current result being viewed
   const [refreshKey, setRefreshKey] = useState(0)  // For forcing re-parse
+  const [showSearch, setShowSearch] = useState(false)  // Show floating search
+  const [isImmersive, setIsImmersive] = useState(false)  // Immersive mode
+
+  // Toggle immersive mode
+  const toggleImmersive = useCallback(() => {
+    setIsImmersive(prev => !prev)
+  }, [])
+
+  // Handle keyboard shortcuts for search and immersive mode
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Ctrl/Cmd + F to open search
+      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+        e.preventDefault()
+        setShowSearch(true)
+      }
+      // Escape to exit immersive mode (if search is not open)
+      if (e.key === 'Escape' && !showSearch && isImmersive) {
+        setIsImmersive(false)
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [showSearch, isImmersive])
+
+  // Apply/remove immersive class to body
+  useEffect(() => {
+    if (isImmersive) {
+      document.body.classList.add('immersive-mode')
+    } else {
+      document.body.classList.remove('immersive-mode')
+    }
+    return () => document.body.classList.remove('immersive-mode')
+  }, [isImmersive])
 
   // Clear cache and refresh
   const handleRefreshCache = useCallback(async () => {
@@ -873,6 +908,28 @@ function SessionDetailView({
       setCurrentSearchIndex(-1)
     }
   }, [searchQuery, totalMessages, virtualizer])
+
+  // Search navigation functions
+  const handleSearchNext = useCallback(() => {
+    if (searchResults.length === 0) return
+    const newIndex = currentSearchIndex >= searchResults.length - 1 ? 0 : currentSearchIndex + 1
+    setCurrentSearchIndex(newIndex)
+    virtualizer.scrollToIndex(searchResults[newIndex], { align: 'center' })
+  }, [searchResults, currentSearchIndex, virtualizer])
+
+  const handleSearchPrev = useCallback(() => {
+    if (searchResults.length === 0) return
+    const newIndex = currentSearchIndex <= 0 ? searchResults.length - 1 : currentSearchIndex - 1
+    setCurrentSearchIndex(newIndex)
+    virtualizer.scrollToIndex(searchResults[newIndex], { align: 'center' })
+  }, [searchResults, currentSearchIndex, virtualizer])
+
+  const handleSearchClose = useCallback(() => {
+    setShowSearch(false)
+    setSearchQuery('')
+    setSearchResults([])
+    setCurrentSearchIndex(-1)
+  }, [])
 
   // Load visible messages from IndexedDB
   useEffect(() => {
@@ -1068,6 +1125,36 @@ function SessionDetailView({
           <span>Modified: {formatDateTime(session.modifiedAt)}</span>
           <span>Source: {source.machineName}</span>
           <button
+            onClick={() => setShowSearch(true)}
+            style={{
+              padding: 'var(--space-1) var(--space-2)',
+              fontSize: '12px',
+              cursor: 'pointer',
+              background: 'var(--bg-tertiary)',
+              border: '1px solid var(--border-default)',
+              borderRadius: 'var(--radius-sm)',
+              color: 'var(--text-secondary)',
+            }}
+            title="Search (Ctrl+F)"
+          >
+            🔍 Search
+          </button>
+          <button
+            onClick={toggleImmersive}
+            style={{
+              padding: 'var(--space-1) var(--space-2)',
+              fontSize: '12px',
+              cursor: 'pointer',
+              background: 'var(--bg-tertiary)',
+              border: '1px solid var(--border-default)',
+              borderRadius: 'var(--radius-sm)',
+              color: 'var(--text-secondary)',
+            }}
+            title="Enter immersive mode"
+          >
+            ⛶ Immersive
+          </button>
+          <button
             onClick={handleRefreshCache}
             style={{
               marginLeft: 'auto',
@@ -1086,86 +1173,24 @@ function SessionDetailView({
         </div>
       </div>
 
+      {/* Floating Search */}
+      {showSearch && (
+        <FloatingSearch
+          totalResults={searchResults.length}
+          currentIndex={currentSearchIndex}
+          onSearch={setSearchQuery}
+          onNext={handleSearchNext}
+          onPrev={handleSearchPrev}
+          onClose={handleSearchClose}
+        />
+      )}
+
+      {/* Immersive mode exit hint */}
+      <div className="immersive-exit-hint" onClick={toggleImmersive}>
+        Press Esc or click to exit • Ctrl+F to search
+      </div>
+
       <div className="section conversation-section">
-        <div className="search-box" style={{ marginBottom: 'var(--space-3)', display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
-          <input
-            type="text"
-            placeholder="Search messages..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                if (e.shiftKey) {
-                  // Previous result
-                  if (searchResults.length > 0) {
-                    const newIndex = currentSearchIndex <= 0 ? searchResults.length - 1 : currentSearchIndex - 1
-                    setCurrentSearchIndex(newIndex)
-                    virtualizer.scrollToIndex(searchResults[newIndex], { align: 'center' })
-                  }
-                } else {
-                  // Next result
-                  if (searchResults.length > 0) {
-                    const newIndex = currentSearchIndex >= searchResults.length - 1 ? 0 : currentSearchIndex + 1
-                    setCurrentSearchIndex(newIndex)
-                    virtualizer.scrollToIndex(searchResults[newIndex], { align: 'center' })
-                  }
-                }
-              } else if (e.key === 'Escape') {
-                setSearchQuery('')
-                setSearchResults([])
-                setCurrentSearchIndex(-1)
-              }
-            }}
-            style={{
-              flex: 1,
-              padding: 'var(--space-2) var(--space-3)',
-              border: '1px solid var(--border-default)',
-              borderRadius: 'var(--radius-md)',
-              background: 'var(--bg-secondary)',
-              color: 'var(--text-primary)',
-              fontSize: '14px',
-            }}
-          />
-          {searchResults.length > 0 && (
-            <>
-              <span style={{ fontSize: '13px', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
-                {currentSearchIndex + 1} / {searchResults.length}
-              </span>
-              <button
-                onClick={() => {
-                  const newIndex = currentSearchIndex <= 0 ? searchResults.length - 1 : currentSearchIndex - 1
-                  setCurrentSearchIndex(newIndex)
-                  virtualizer.scrollToIndex(searchResults[newIndex], { align: 'center' })
-                }}
-                style={{ padding: 'var(--space-1) var(--space-2)', cursor: 'pointer' }}
-              >
-                ↑
-              </button>
-              <button
-                onClick={() => {
-                  const newIndex = currentSearchIndex >= searchResults.length - 1 ? 0 : currentSearchIndex + 1
-                  setCurrentSearchIndex(newIndex)
-                  virtualizer.scrollToIndex(searchResults[newIndex], { align: 'center' })
-                }}
-                style={{ padding: 'var(--space-1) var(--space-2)', cursor: 'pointer' }}
-              >
-                ↓
-              </button>
-            </>
-          )}
-          {searchQuery && (
-            <button
-              onClick={() => {
-                setSearchQuery('')
-                setSearchResults([])
-                setCurrentSearchIndex(-1)
-              }}
-              style={{ padding: 'var(--space-1) var(--space-2)', cursor: 'pointer' }}
-            >
-              ✕
-            </button>
-          )}
-        </div>
         <h2>Conversation</h2>
         <div className="conversation-container">
           <div

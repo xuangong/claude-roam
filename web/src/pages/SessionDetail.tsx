@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom'
 import { getSessionDetail, pullSession, type SessionDetailResponse, type Segment } from '../api'
 import { MiniMap, type MiniMapItem } from '../components/MiniMap'
 import { MessageRow } from '../components/MessageComponents'
+import { FloatingSearch } from '../components/FloatingSearch'
 import type { DisplayMessage, ContentBlock, RawMessage, ToolUseInfo } from '../types/message'
 import { formatDateTime } from '../utils/format'
 
@@ -433,6 +434,38 @@ function SessionDetail() {
   // Search state
   const [searchQuery, setSearchQuery] = useState('')
   const [currentSearchIndex, setCurrentSearchIndex] = useState(-1)
+  const [showSearch, setShowSearch] = useState(false)
+  const [isImmersive, setIsImmersive] = useState(false)
+
+  // Toggle immersive mode
+  const toggleImmersive = useCallback(() => {
+    setIsImmersive(prev => !prev)
+  }, [])
+
+  // Handle keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+        e.preventDefault()
+        setShowSearch(true)
+      }
+      if (e.key === 'Escape' && !showSearch && isImmersive) {
+        setIsImmersive(false)
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [showSearch, isImmersive])
+
+  // Apply/remove immersive class to body
+  useEffect(() => {
+    if (isImmersive) {
+      document.body.classList.add('immersive-mode')
+    } else {
+      document.body.classList.remove('immersive-mode')
+    }
+    return () => document.body.classList.remove('immersive-mode')
+  }, [isImmersive])
 
   // Search results - message indices with matches
   const searchResults = useMemo(() => {
@@ -475,6 +508,12 @@ function SessionDetail() {
     setCurrentSearchIndex(newIndex)
     scrollToMessage(searchResults[newIndex])
   }, [searchResults, currentSearchIndex, scrollToMessage])
+
+  const handleSearchClose = useCallback(() => {
+    setShowSearch(false)
+    setSearchQuery('')
+    setCurrentSearchIndex(-1)
+  }, [])
 
   // Reset search index when query changes
   useEffect(() => {
@@ -652,26 +691,54 @@ function SessionDetail() {
           <span>{detail.session.total_lines} lines</span>
           <span>Created: {formatDateTime(detail.session.created_at)}</span>
           <span>Updated: {formatDateTime(detail.session.updated_at)}</span>
+          <button
+            onClick={() => setShowSearch(true)}
+            style={{
+              padding: 'var(--space-1) var(--space-2)',
+              fontSize: '12px',
+              cursor: 'pointer',
+              background: 'var(--bg-tertiary)',
+              border: '1px solid var(--border-default)',
+              borderRadius: 'var(--radius-sm)',
+              color: 'var(--text-secondary)',
+            }}
+            title="Search (Ctrl+F)"
+          >
+            🔍 Search
+          </button>
+          <button
+            onClick={toggleImmersive}
+            style={{
+              padding: 'var(--space-1) var(--space-2)',
+              fontSize: '12px',
+              cursor: 'pointer',
+              background: 'var(--bg-tertiary)',
+              border: '1px solid var(--border-default)',
+              borderRadius: 'var(--radius-sm)',
+              color: 'var(--text-secondary)',
+            }}
+            title="Enter immersive mode"
+          >
+            ⛶ Immersive
+          </button>
         </div>
-        {/* Search bar */}
-        <div className="search-box">
-          <input
-            type="text"
-            placeholder="Search messages..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="search-input"
-          />
-          {searchResults.length > 0 && (
-            <>
-              <span className="search-count">
-                {currentSearchIndex + 1} / {searchResults.length}
-              </span>
-              <button onClick={goToPrevResult} className="search-nav-btn" title="Previous">↑</button>
-              <button onClick={goToNextResult} className="search-nav-btn" title="Next">↓</button>
-            </>
-          )}
-        </div>
+      </div>
+
+      {/* Floating Search */}
+      {showSearch && (
+        <FloatingSearch
+          totalResults={searchResults.length}
+          currentIndex={currentSearchIndex}
+          onSearch={setSearchQuery}
+          onNext={goToNextResult}
+          onPrev={goToPrevResult}
+          onClose={handleSearchClose}
+        />
+      )}
+
+      {/* Immersive mode exit hint */}
+      <div className="immersive-exit-hint" onClick={toggleImmersive}>
+        Press Esc or click to exit • Ctrl+F to search
       </div>
 
       <div className="section">
