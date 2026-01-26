@@ -6,6 +6,7 @@ import {
   hashString,
   isSessionCached,
   getSessionMeta,
+  clearSession,
   MessageCache
 } from '../utils/messageStore'
 
@@ -209,7 +210,44 @@ function createParserWorker(): Worker {
       }
 
       if (msgType === 'system') {
-        results.push({ displayType: 'system', blocks: [] });
+        // System messages may have content and subtype
+        const subtype = obj.subtype || '';
+        const content = obj.content || '';
+        let displayContent = '';
+        let jsonDetails = null;
+
+        if (subtype === 'compact_boundary') {
+          displayContent = '[Compact Boundary] ' + content;
+          if (obj.compactMetadata) {
+            jsonDetails = { subtype, compactMetadata: obj.compactMetadata };
+          }
+        } else if (subtype === 'stop_hook_summary') {
+          displayContent = '[Hook] ' + (obj.stopReason || content || 'hook executed');
+          jsonDetails = {
+            subtype,
+            hookCount: obj.hookCount,
+            hookInfos: obj.hookInfos,
+            hookErrors: obj.hookErrors,
+            preventedContinuation: obj.preventedContinuation,
+            stopReason: obj.stopReason,
+            hasOutput: obj.hasOutput
+          };
+        } else if (content) {
+          displayContent = content;
+        }
+
+        const blocks = [];
+        if (displayContent) {
+          blocks.push({ type: 'text', content: truncate(displayContent, 5000) });
+        }
+        if (jsonDetails) {
+          blocks.push({ type: 'json', content: JSON.stringify(jsonDetails, null, 2) });
+        }
+
+        results.push({
+          displayType: 'system',
+          blocks: blocks
+        });
         return results;
       }
 
@@ -683,13 +721,31 @@ function ToolResultDisplay({ content, is_error, toolName, searchQuery, highlight
   )
 }
 
-function SystemDisplay() {
+function SystemDisplay({ blocks, searchQuery }: { blocks: Array<{ type: string; content?: string }>; searchQuery?: string }) {
+  const [isExpanded, setIsExpanded] = useState(false)
+  const textContent = blocks.find(b => b.type === 'text')?.content
+  const jsonContent = blocks.find(b => b.type === 'json')?.content
+  const hasContent = textContent || jsonContent
+
   return (
     <div className="system-block">
-      <div className="system-block-header">
+      <div className="system-block-header" onClick={() => setIsExpanded(!isExpanded)}>
         <span className="system-block-icon">⚙</span>
         <span className="system-block-label">System</span>
+        {hasContent && <span className="system-block-expand">{isExpanded ? '▲' : '▼'}</span>}
       </div>
+      {isExpanded && hasContent && (
+        <div className="system-block-content">
+          {textContent && (
+            <div>{searchQuery ? highlightText(textContent, searchQuery) : textContent}</div>
+          )}
+          {jsonContent && (
+            <pre style={{ marginTop: textContent ? 'var(--space-2)' : 0, opacity: 0.7 }}>
+              {jsonContent}
+            </pre>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -815,7 +871,7 @@ function MessageRow({ msg, searchQuery, isSearchMatch }: {
     )
   }
   if (msg.displayType === 'system') {
-    return <SystemDisplay />
+    return <SystemDisplay blocks={msg.blocks} searchQuery={query} />
   }
   return null
 }
@@ -880,6 +936,14 @@ function SessionDetailView({
   const [searchQuery, setSearchQuery] = useState('')
   const [searchResults, setSearchResults] = useState<number[]>([])  // Message indices with matches
   const [currentSearchIndex, setCurrentSearchIndex] = useState(-1)  // Current result being viewed
+  const [refreshKey, setRefreshKey] = useState(0)  // For forcing re-parse
+
+  // Clear cache and refresh
+  const handleRefreshCache = useCallback(async () => {
+    await clearSession(session.id)
+    cacheRef.current?.clear()
+    setRefreshKey(k => k + 1)
+  }, [session.id])
 
   // Initialize and parse session data
   useEffect(() => {
@@ -887,12 +951,12 @@ function SessionDetailView({
     const sessionId = session.id
     const dataHash = hashString(session.data)
 
-    async function init() {
+    async function init(forceReparse = false) {
       setIsLoading(true)
       setLoadingProgress('Checking cache...')
 
-      // Check if already cached
-      const cached = await isSessionCached(sessionId, dataHash)
+      // Check if already cached (skip if forcing reparse)
+      const cached = !forceReparse && await isSessionCached(sessionId, dataHash)
       if (cached && !cancelled) {
         const meta = await getSessionMeta(sessionId)
         if (meta) {
@@ -944,13 +1008,13 @@ function SessionDetailView({
       worker.postMessage({ data: session.data, sessionId, dataHash })
     }
 
-    init()
+    init(refreshKey > 0)
 
     return () => {
       cancelled = true
       cacheRef.current?.clear()
     }
-  }, [session])
+  }, [session, refreshKey])
 
   // Virtualizer
   const virtualizer = useVirtualizer({
@@ -1193,6 +1257,22 @@ function SessionDetailView({
           <span>{totalMessages} messages</span>
           <span>Modified: {formatDateTime(session.modifiedAt)}</span>
           <span>Source: {source.machineName}</span>
+          <button
+            onClick={handleRefreshCache}
+            style={{
+              marginLeft: 'auto',
+              padding: 'var(--space-1) var(--space-2)',
+              fontSize: '12px',
+              cursor: 'pointer',
+              background: 'var(--bg-tertiary)',
+              border: '1px solid var(--border-default)',
+              borderRadius: 'var(--radius-sm)',
+              color: 'var(--text-secondary)',
+            }}
+            title="Clear cache and re-parse messages"
+          >
+            ↻ Refresh
+          </button>
         </div>
       </div>
 
