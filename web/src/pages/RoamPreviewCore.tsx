@@ -939,8 +939,7 @@ function SessionDetailView({
     }
   }, [virtualizer.range, isLoading, totalMessages])
 
-  // Minimap items - use uniform height ratios based on message count
-  // This ensures consistency with how visibleStart/visibleEnd and separator positions are calculated
+  // Minimap items - merge adjacent same-type messages for better visibility
   const minimapItems = useMemo<MiniMapItem[]>(() => {
     if (totalMessages === 0 || !typeString) return []
 
@@ -956,18 +955,51 @@ function SessionDetailView({
 
     const items: MiniMapItem[] = []
     let treeIdx = 0
+    let currentType: string | null = null
+    let currentStart = 0
+    let currentCount = 0
+
+    const pushCurrentBlock = () => {
+      if (currentType && currentCount > 0) {
+        items.push({
+          type: currentType,
+          index: currentStart,
+          heightRatio: currentCount / totalMessages,
+          treeIndex: currentType === 'tree-separator' ? treeIdx : undefined
+        })
+      }
+    }
+
     for (let i = 0; i < totalMessages; i++) {
       const typeChar = typeString[i] || 'a'
       const displayType = charToType[typeChar] || 'assistant'
-      if (displayType === 'tree-separator') treeIdx++
 
-      items.push({
-        type: displayType,
-        index: i,
-        heightRatio: 1 / totalMessages,
-        treeIndex: displayType === 'tree-separator' ? treeIdx : undefined
-      })
+      if (displayType === 'tree-separator') {
+        // Always create separate item for separator
+        pushCurrentBlock()
+        treeIdx++
+        items.push({
+          type: 'tree-separator',
+          index: i,
+          heightRatio: 1 / totalMessages,
+          treeIndex: treeIdx
+        })
+        currentType = null
+        currentCount = 0
+      } else if (displayType === currentType) {
+        // Merge with current block
+        currentCount++
+      } else {
+        // Start new block
+        pushCurrentBlock()
+        currentType = displayType
+        currentStart = i
+        currentCount = 1
+      }
     }
+    // Push final block
+    pushCurrentBlock()
+
     return items
   }, [totalMessages, typeString])
 

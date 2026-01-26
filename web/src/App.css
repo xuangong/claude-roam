@@ -1008,6 +1008,23 @@ input::placeholder {
   transition: all var(--transition-fast);
 }
 
+/* Extend a dashed line from ruler tick across the content area */
+.minimap-ruler-tick::after {
+  content: '';
+  position: absolute;
+  left: 20px;
+  width: 40px;
+  height: 1px;
+  background: repeating-linear-gradient(
+    to right,
+    #f59e0b 0px,
+    #f59e0b 3px,
+    transparent 3px,
+    transparent 6px
+  );
+  pointer-events: none;
+}
+
 .minimap-ruler-tick:hover {
   background: rgba(245, 158, 11, 0.2);
 }
@@ -1107,23 +1124,6 @@ input::placeholder {
   background: transparent;
   min-height: 2px;
   position: relative;
-}
-
-/* Dashed line across the minimap content area */
-.minimap-tree-separator::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 50%;
-  height: 1px;
-  background: repeating-linear-gradient(
-    to right,
-    #f59e0b 0px,
-    #f59e0b 3px,
-    transparent 3px,
-    transparent 6px
-  );
 }
 
 .minimap-viewport {

@@ -26,8 +26,7 @@ export function MiniMap({
   visibleStart,
   visibleEnd,
   onNavigate,
-  totalMessages = 0,
-  separatorPositions: externalSeparatorPositions
+  totalMessages = 0
 }: MiniMapProps) {
   const minimapRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
@@ -173,19 +172,15 @@ export function MiniMap({
   const viewportHeight = (visibleEnd - visibleStart) * contentRect.height
 
   // Calculate positions of tree separators for the ruler
-  // Use external positions if provided (more accurate), otherwise calculate from items
+  // Always calculate from items to ensure alignment with minimap content
   const separatorPositions = useMemo(() => {
-    if (externalSeparatorPositions && externalSeparatorPositions.length > 0) {
-      return externalSeparatorPositions
-    }
-
     const positions: { ratio: number; index: number }[] = []
     let cumulative = 0
     const totalRatio = items.reduce((sum, item) => sum + item.heightRatio, 0)
 
     items.forEach((item) => {
       if (item.type === 'tree-separator') {
-        // Position at the CENTER of this item (not the start)
+        // Position at the CENTER of this item (matching the ::after top: 50%)
         const centerRatio = totalRatio > 0 ? (cumulative + item.heightRatio / 2) / totalRatio : 0
         positions.push({
           ratio: centerRatio,
@@ -195,7 +190,7 @@ export function MiniMap({
       cumulative += item.heightRatio
     })
     return positions
-  }, [items, externalSeparatorPositions])
+  }, [items])
 
   // Filter separator positions to avoid overlapping labels
   const visibleSeparatorPositions = useMemo(() => {
