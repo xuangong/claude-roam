@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { MiniMap, type MiniMapItem, type SeparatorPosition } from '../components/MiniMap'
+import { MiniMap, type MiniMapItem } from '../components/MiniMap'
 import {
   type DisplayMessage,
   hashString,
@@ -595,8 +595,39 @@ function formatDateTime(dateStr: string): string {
   })
 }
 
+// Highlight search query in text
+function highlightText(text: string, query: string): React.ReactNode {
+  if (!query.trim()) return text
+
+  const lowerText = text.toLowerCase()
+  const lowerQuery = query.toLowerCase()
+  const parts: React.ReactNode[] = []
+  let lastIndex = 0
+  let index = lowerText.indexOf(lowerQuery)
+  let keyIndex = 0
+
+  while (index !== -1) {
+    if (index > lastIndex) {
+      parts.push(text.substring(lastIndex, index))
+    }
+    parts.push(
+      <mark key={keyIndex++} className="search-highlight">
+        {text.substring(index, index + query.length)}
+      </mark>
+    )
+    lastIndex = index + query.length
+    index = lowerText.indexOf(lowerQuery, lastIndex)
+  }
+
+  if (lastIndex < text.length) {
+    parts.push(text.substring(lastIndex))
+  }
+
+  return parts.length > 0 ? parts : text
+}
+
 // Tool display components
-function ToolCallDisplay({ name, input }: { name: string; input: Record<string, unknown> }) {
+function ToolCallDisplay({ name, input, highlightClass }: { name: string; input: Record<string, unknown>; highlightClass?: string }) {
   const [isExpanded, setIsExpanded] = useState(false)
 
   const getInputPreview = () => {
@@ -610,7 +641,7 @@ function ToolCallDisplay({ name, input }: { name: string; input: Record<string, 
   }
 
   return (
-    <div className="tool-call-block">
+    <div className={`tool-call-block${highlightClass || ''}`}>
       <div className="tool-call-header" onClick={() => setIsExpanded(!isExpanded)}>
         <span className="tool-call-arrow">→</span>
         <span className="tool-call-label">Tool Call</span>
@@ -623,14 +654,20 @@ function ToolCallDisplay({ name, input }: { name: string; input: Record<string, 
   )
 }
 
-function ToolResultDisplay({ content, is_error, toolName }: { content: string; is_error?: boolean; toolName?: string }) {
+function ToolResultDisplay({ content, is_error, toolName, searchQuery, highlightClass }: {
+  content: string
+  is_error?: boolean
+  toolName?: string
+  searchQuery?: string
+  highlightClass?: string
+}) {
   const [isExpanded, setIsExpanded] = useState(false)
   const lines = content.split('\n')
   const previewLines = lines.slice(0, 3).join('\n')
   const hasMore = lines.length > 3
 
   return (
-    <div className={`tool-result-block ${is_error ? 'error' : ''}`}>
+    <div className={`tool-result-block ${is_error ? 'error' : ''}${highlightClass || ''}`}>
       <div className="tool-result-header" onClick={() => setIsExpanded(!isExpanded)}>
         <span className="tool-result-arrow">←</span>
         <span className="tool-result-label">{is_error ? 'Error' : 'Result'}</span>
@@ -639,9 +676,9 @@ function ToolResultDisplay({ content, is_error, toolName }: { content: string; i
         <span className="tool-result-icon">{is_error ? '✗' : '✓'}</span>
         <span className="tool-result-expand">{isExpanded ? '▲' : '▼'}</span>
       </div>
-      {isExpanded && <pre className="tool-content">{content}</pre>}
-      {!isExpanded && hasMore && <pre className="tool-content tool-content-preview">{previewLines}...</pre>}
-      {!isExpanded && !hasMore && <pre className="tool-content tool-content-preview">{content}</pre>}
+      {isExpanded && <pre className="tool-content">{searchQuery ? highlightText(content, searchQuery) : content}</pre>}
+      {!isExpanded && hasMore && <pre className="tool-content tool-content-preview">{searchQuery ? highlightText(previewLines + '...', searchQuery) : previewLines + '...'}</pre>}
+      {!isExpanded && !hasMore && <pre className="tool-content tool-content-preview">{searchQuery ? highlightText(content, searchQuery) : content}</pre>}
     </div>
   )
 }
@@ -720,27 +757,34 @@ function SessionListView({
 }
 
 // Message Row Component
-function MessageRow({ msg }: { msg: DisplayMessage | null; index: number }) {
+function MessageRow({ msg, searchQuery, isSearchMatch }: {
+  msg: DisplayMessage | null
+  searchQuery?: string
+  isSearchMatch?: boolean
+}) {
   if (!msg) {
     return <div className="message loading">Loading...</div>
   }
 
+  const query = searchQuery || ''
+  const highlightClass = isSearchMatch ? ' search-match' : ''
+
   if (msg.displayType === 'human') {
     return (
-      <div className="message human">
+      <div className={`message human${highlightClass}`}>
         <div className="message-role"><span className="role-icon">❯</span> Human</div>
         <div className="message-content">
-          {msg.blocks.map((b, j) => b.type === 'text' ? <span key={j}>{b.content}</span> : null)}
+          {msg.blocks.map((b, j) => b.type === 'text' ? <span key={j}>{highlightText(b.content, query)}</span> : null)}
         </div>
       </div>
     )
   }
   if (msg.displayType === 'assistant') {
     return (
-      <div className="message assistant">
+      <div className={`message assistant${highlightClass}`}>
         <div className="message-role"><span className="role-icon">◆</span> Assistant</div>
         <div className="message-content">
-          {msg.blocks.map((b, j) => b.type === 'text' ? <span key={j}>{b.content}</span> : null)}
+          {msg.blocks.map((b, j) => b.type === 'text' ? <span key={j}>{highlightText(b.content, query)}</span> : null)}
         </div>
       </div>
     )
@@ -748,13 +792,13 @@ function MessageRow({ msg }: { msg: DisplayMessage | null; index: number }) {
   if (msg.displayType === 'tool_call') {
     const block = msg.blocks[0]
     if (block?.type === 'tool_use') {
-      return <ToolCallDisplay name={block.name} input={block.input} />
+      return <ToolCallDisplay name={block.name} input={block.input} highlightClass={highlightClass} />
     }
   }
   if (msg.displayType === 'tool_result') {
     const block = msg.blocks[0]
     if (block?.type === 'tool_result') {
-      return <ToolResultDisplay content={block.content} is_error={block.is_error} toolName={msg.toolName} />
+      return <ToolResultDisplay content={block.content} is_error={block.is_error} toolName={msg.toolName} searchQuery={query} highlightClass={highlightClass} />
     }
   }
   if (msg.displayType === 'tree-separator') {
@@ -831,6 +875,11 @@ function SessionDetailView({
   const [visibleEnd, setVisibleEnd] = useState(1)
   const parentRef = useRef<HTMLDivElement>(null)
   const cacheRef = useRef<MessageCache | null>(null)
+
+  // Search state
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchResults, setSearchResults] = useState<number[]>([])  // Message indices with matches
+  const [currentSearchIndex, setCurrentSearchIndex] = useState(-1)  // Current result being viewed
 
   // Initialize and parse session data
   useEffect(() => {
@@ -910,6 +959,46 @@ function SessionDetailView({
     estimateSize: (index) => estimateMessageHeight(visibleMessages.get(index) || null, typeString[index]),
     overscan: 20,
   })
+
+  // Search effect - search through all messages when query changes
+  useEffect(() => {
+    if (!searchQuery.trim() || !cacheRef.current || totalMessages === 0) {
+      setSearchResults([])
+      setCurrentSearchIndex(-1)
+      return
+    }
+
+    const query = searchQuery.toLowerCase()
+    const results: number[] = []
+
+    // Search through all cached messages
+    for (let i = 0; i < totalMessages; i++) {
+      const msg = cacheRef.current.getIfCached(i)
+      if (msg) {
+        // Search in text blocks
+        for (const block of msg.blocks) {
+          if (block.type === 'text' && block.content.toLowerCase().includes(query)) {
+            results.push(i)
+            break
+          } else if (block.type === 'tool_use' && block.name.toLowerCase().includes(query)) {
+            results.push(i)
+            break
+          } else if (block.type === 'tool_result' && block.content.toLowerCase().includes(query)) {
+            results.push(i)
+            break
+          }
+        }
+      }
+    }
+
+    setSearchResults(results)
+    if (results.length > 0) {
+      setCurrentSearchIndex(0)
+      virtualizer.scrollToIndex(results[0], { align: 'center' })
+    } else {
+      setCurrentSearchIndex(-1)
+    }
+  }, [searchQuery, totalMessages, virtualizer])
 
   // Load visible messages from IndexedDB
   useEffect(() => {
@@ -1002,27 +1091,6 @@ function SessionDetailView({
 
     return items
   }, [totalMessages, typeString])
-
-  // Calculate separator positions based on message index ratio
-  // This matches how visibleStart/visibleEnd are calculated
-  const separatorPositions = useMemo<SeparatorPosition[]>(() => {
-    if (!typeString || totalMessages === 0) return []
-
-    const positions: SeparatorPosition[] = []
-    let treeIdx = 0
-
-    for (let i = 0; i < typeString.length; i++) {
-      if (typeString[i] === 's') {
-        treeIdx++
-        // Position based on message index ratio (center of the separator message)
-        positions.push({
-          ratio: (i + 0.5) / totalMessages,
-          index: treeIdx
-        })
-      }
-    }
-    return positions
-  }, [typeString, totalMessages])
 
   // Ref to track ongoing scroll target
   const scrollTargetRef = useRef<number | null>(null)
@@ -1129,6 +1197,85 @@ function SessionDetailView({
       </div>
 
       <div className="section conversation-section">
+        <div className="search-box" style={{ marginBottom: 'var(--space-3)', display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
+          <input
+            type="text"
+            placeholder="Search messages..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                if (e.shiftKey) {
+                  // Previous result
+                  if (searchResults.length > 0) {
+                    const newIndex = currentSearchIndex <= 0 ? searchResults.length - 1 : currentSearchIndex - 1
+                    setCurrentSearchIndex(newIndex)
+                    virtualizer.scrollToIndex(searchResults[newIndex], { align: 'center' })
+                  }
+                } else {
+                  // Next result
+                  if (searchResults.length > 0) {
+                    const newIndex = currentSearchIndex >= searchResults.length - 1 ? 0 : currentSearchIndex + 1
+                    setCurrentSearchIndex(newIndex)
+                    virtualizer.scrollToIndex(searchResults[newIndex], { align: 'center' })
+                  }
+                }
+              } else if (e.key === 'Escape') {
+                setSearchQuery('')
+                setSearchResults([])
+                setCurrentSearchIndex(-1)
+              }
+            }}
+            style={{
+              flex: 1,
+              padding: 'var(--space-2) var(--space-3)',
+              border: '1px solid var(--border-default)',
+              borderRadius: 'var(--radius-md)',
+              background: 'var(--bg-secondary)',
+              color: 'var(--text-primary)',
+              fontSize: '14px',
+            }}
+          />
+          {searchResults.length > 0 && (
+            <>
+              <span style={{ fontSize: '13px', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
+                {currentSearchIndex + 1} / {searchResults.length}
+              </span>
+              <button
+                onClick={() => {
+                  const newIndex = currentSearchIndex <= 0 ? searchResults.length - 1 : currentSearchIndex - 1
+                  setCurrentSearchIndex(newIndex)
+                  virtualizer.scrollToIndex(searchResults[newIndex], { align: 'center' })
+                }}
+                style={{ padding: 'var(--space-1) var(--space-2)', cursor: 'pointer' }}
+              >
+                ↑
+              </button>
+              <button
+                onClick={() => {
+                  const newIndex = currentSearchIndex >= searchResults.length - 1 ? 0 : currentSearchIndex + 1
+                  setCurrentSearchIndex(newIndex)
+                  virtualizer.scrollToIndex(searchResults[newIndex], { align: 'center' })
+                }}
+                style={{ padding: 'var(--space-1) var(--space-2)', cursor: 'pointer' }}
+              >
+                ↓
+              </button>
+            </>
+          )}
+          {searchQuery && (
+            <button
+              onClick={() => {
+                setSearchQuery('')
+                setSearchResults([])
+                setCurrentSearchIndex(-1)
+              }}
+              style={{ padding: 'var(--space-1) var(--space-2)', cursor: 'pointer' }}
+            >
+              ✕
+            </button>
+          )}
+        </div>
         <h2>Conversation</h2>
         <div className="conversation-container">
           <div
@@ -1162,7 +1309,11 @@ function SessionDetailView({
                         transform: `translateY(${virtualRow.start}px)`,
                       }}
                     >
-                      <MessageRow msg={msg} index={virtualRow.index} />
+                      <MessageRow
+                        msg={msg}
+                        searchQuery={searchQuery}
+                        isSearchMatch={searchResults.includes(virtualRow.index)}
+                      />
                     </div>
                   )
                 })}
@@ -1176,7 +1327,8 @@ function SessionDetailView({
               visibleEnd={visibleEnd}
               onNavigate={handleMinimapNavigate}
               totalMessages={totalMessages}
-              separatorPositions={separatorPositions}
+              searchResults={searchResults}
+              currentSearchIndex={currentSearchIndex}
             />
           )}
         </div>

@@ -19,6 +19,8 @@ interface MiniMapProps {
   onNavigate: (ratio: number) => void
   totalMessages?: number  // For position indicator
   separatorPositions?: SeparatorPosition[]  // Pre-calculated separator positions
+  searchResults?: number[]  // Message indices with search matches
+  currentSearchIndex?: number  // Currently focused search result
 }
 
 export function MiniMap({
@@ -26,7 +28,9 @@ export function MiniMap({
   visibleStart,
   visibleEnd,
   onNavigate,
-  totalMessages = 0
+  totalMessages = 0,
+  searchResults = [],
+  currentSearchIndex = -1
 }: MiniMapProps) {
   const minimapRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
@@ -291,6 +295,24 @@ export function MiniMap({
           <div key={i} className={`minimap-item minimap-${item.type}`} style={{ flex: `${item.heightRatio} 0 0` }} />
         ))}
       </div>
+      {/* Search result markers */}
+      {searchResults.length > 0 && totalMessages > 0 && (
+        <div className="minimap-search-markers">
+          {searchResults.map((msgIndex, i) => {
+            const ratio = msgIndex / totalMessages
+            const isCurrent = searchResults[currentSearchIndex] === msgIndex
+            return (
+              <div
+                key={i}
+                className={`minimap-search-marker ${isCurrent ? 'current' : ''}`}
+                style={{ top: `${ratio * contentRect.height}px` }}
+                onClick={(e) => { e.stopPropagation(); onNavigate(ratio) }}
+                title={`Search result ${i + 1}`}
+              />
+            )
+          })}
+        </div>
+      )}
       <div className="minimap-viewport" style={{ top: `${viewportTop}px`, height: `${viewportHeight}px` }} />
       <div className="minimap-resize-handle" title="Drag to resize">═</div>
     </div>

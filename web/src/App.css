@@ -1136,6 +1136,43 @@ input::placeholder {
   box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.6), 0 0 8px rgba(255, 255, 255, 0.3);
 }
 
+/* Search result markers in minimap - extends to the right side */
+.minimap-search-markers {
+  position: absolute;
+  top: 20px;
+  left: 100%;  /* Start from right edge of minimap */
+  width: 20px;
+  bottom: 20px;
+  pointer-events: none;
+}
+
+.minimap-search-marker {
+  position: absolute;
+  left: 4px;
+  width: 12px;
+  height: 2px;
+  background: #f59e0b;  /* Amber/orange color */
+  transform: translateY(-50%);
+  pointer-events: auto;
+  cursor: pointer;
+  opacity: 0.9;
+  border-radius: 1px;
+}
+
+.minimap-search-marker:hover {
+  opacity: 1;
+  width: 16px;
+  background: #f97316;
+}
+
+.minimap-search-marker.current {
+  background: #f59e0b;  /* Same amber, just brighter and larger */
+  width: 18px;
+  height: 4px;
+  opacity: 1;
+  box-shadow: 0 0 6px #f59e0b;
+}
+
 .empty-conversation {
   text-align: center;
   padding: var(--space-12);
@@ -1156,6 +1193,18 @@ input::placeholder {
 
 .message.assistant {
   border-left: 2px solid var(--accent-purple);
+}
+
+/* Search highlight styles */
+.search-highlight {
+  background: #fef08a;
+  color: #000;
+  padding: 0 2px;
+  border-radius: 2px;
+}
+
+.search-match {
+  box-shadow: 0 0 0 2px #22c55e;
 }
 
 .message-role {
