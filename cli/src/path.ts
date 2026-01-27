@@ -33,37 +33,38 @@ export function getClaudeProjectsDir(): string {
 
 /**
  * Encode a path for Claude directory naming
- * /home/user/code → -home-user-code
- * C:\Users\foo → -C-Users-foo
+ * Unix: /home/user/code → -home-user-code
+ * Windows: C:\Users\foo → C--Users-foo
  */
 export function encodePathForClaude(absPath: string): string {
-  // Normalize path separators
-  let normalized = absPath.replace(/\\/g, "/");
+  // Normalize path separators to forward slashes
+  const normalized = absPath.replace(/\\/g, "/");
 
-  // Handle Windows drive letters
+  // Check if it's a Windows path (starts with drive letter)
   if (/^[A-Z]:/i.test(normalized)) {
-    normalized = normalized.replace(/^([A-Z]):/, "/$1");
+    // Windows: C:/Users/foo → C--Users-foo
+    // Replace :/ with -- and remaining / with -
+    return normalized.replace(/:\//, "--").replace(/\//g, "-");
   }
 
-  // Replace slashes with dashes
+  // Unix: /home/user/code → -home-user-code
   return normalized.replace(/\//g, "-");
 }
 
 /**
  * Decode a Claude encoded path
- * -home-user-code → /home/user/code
- * -C-Users-foo → C:/Users/foo
+ * Unix: -home-user-code → /home/user/code
+ * Windows: C--Users-foo → C:/Users/foo
  */
 export function decodeClaudePath(encoded: string): string {
-  // Replace dashes with slashes
-  const decoded = encoded.replace(/-/g, "/");
-
-  // Handle Windows drive letters
-  if (/^\/[A-Z]\//.test(decoded)) {
-    return decoded.replace(/^\/([A-Z])\//, "$1:/");
+  // Check if it's a Windows encoded path (starts with drive letter followed by --)
+  if (/^[A-Z]--/i.test(encoded)) {
+    // Windows: C--Users-foo → C:/Users/foo
+    return encoded.replace(/^([A-Z])--/, "$1:/").replace(/-/g, "/");
   }
 
-  return decoded;
+  // Unix: -home-user-code → /home/user/code
+  return encoded.replace(/-/g, "/");
 }
 
 /**

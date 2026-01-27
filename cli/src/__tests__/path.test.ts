@@ -22,13 +22,13 @@ describe("encodePathForClaude", () => {
 
   test("encodes Windows path correctly", () => {
     expect(encodePathForClaude("C:\\Users\\alice\\code")).toBe(
-      "-C-Users-alice-code"
+      "C--Users-alice-code"
     );
   });
 
   test("encodes Windows path with forward slashes", () => {
     expect(encodePathForClaude("C:/Users/alice/code")).toBe(
-      "-C-Users-alice-code"
+      "C--Users-alice-code"
     );
   });
 
@@ -55,7 +55,7 @@ describe("decodeClaudePath", () => {
   });
 
   test("decodes Windows path correctly", () => {
-    expect(decodeClaudePath("-C-Users-alice-code")).toBe("C:/Users/alice/code");
+    expect(decodeClaudePath("C--Users-alice-code")).toBe("C:/Users/alice/code");
   });
 
   test("handles single directory", () => {
