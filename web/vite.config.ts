@@ -3,6 +3,8 @@ import react from '@vitejs/plugin-react'
 
 export default defineConfig({
   plugins: [react()],
+  // Use relative paths for Tauri compatibility
+  base: './',
   server: {
     proxy: {
       '/api': {
@@ -15,7 +17,6 @@ export default defineConfig({
     rollupOptions: {
       input: {
         main: 'index.html',
-        preview: 'preview.html',
       },
     },
   },

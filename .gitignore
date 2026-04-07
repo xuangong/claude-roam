@@ -49,6 +49,9 @@ web/dist/
 web/dist-preview/
 *.roam
 
+# Rust/Tauri build
+src-tauri/target/
+
 # Coverage
 coverage/
 .coverage

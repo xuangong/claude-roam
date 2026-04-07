@@ -16,7 +16,17 @@ interface MiniMapProps {
   searchResults?: number[]  // Message indices with search matches
   currentSearchIndex?: number  // Currently focused search result
   onSearchResultClick?: (searchIndex: number) => void  // Click handler for search result markers
+  activeFilters?: Set<string>  // Which message types are visible
+  onToggleFilter?: (type: string) => void  // Toggle a filter
 }
+
+const FILTER_TYPES = [
+  { type: 'human', color: '#3b82f6', label: 'Human' },
+  { type: 'assistant', color: '#8b5cf6', label: 'Assistant' },
+  { type: 'tool_call', color: '#d1d5db', label: 'Tool Call' },
+  { type: 'tool_result', color: '#e5e7eb', label: 'Tool Result' },
+  { type: 'system', color: '#f3f4f6', label: 'System' },
+]
 
 export function MiniMap({
   items,
@@ -26,14 +36,18 @@ export function MiniMap({
   totalMessages = 0,
   searchResults = [],
   currentSearchIndex = -1,
-  onSearchResultClick
+  onSearchResultClick,
+  activeFilters,
+  onToggleFilter
 }: MiniMapProps) {
   const minimapRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
   const isDragging = useRef(false)
   const isResizing = useRef(false)
+  const isResizingTop = useRef(false)
   const isMoving = useRef(false)
   const dragOffset = useRef({ x: 0, y: 0 })
+  const resizeTopStart = useRef({ y: 0, top: 0, height: 0 })
   const [, forceUpdate] = useState(0)
   const [hoverRatio, setHoverRatio] = useState<number | null>(null)
   const [isDraggingState, setIsDraggingState] = useState(false)
@@ -62,6 +76,16 @@ export function MiniMap({
       e.preventDefault()
       return
     }
+    if (target.classList.contains('minimap-resize-top-handle')) {
+      isResizingTop.current = true
+      resizeTopStart.current = {
+        y: e.clientY,
+        top: minimapRef.current?.offsetTop ?? 0,
+        height: minimapRef.current?.offsetHeight ?? height
+      }
+      e.preventDefault()
+      return
+    }
     if (target.classList.contains('minimap-move-handle')) {
       isMoving.current = true
       if (minimapRef.current) {
@@ -85,6 +109,16 @@ export function MiniMap({
     onNavigate(ratio)
   }, [onNavigate])
 
+  // Get the offset parent bounds for position calculation (supports absolute positioning in Tauri)
+  const getContainerBounds = useCallback(() => {
+    const parent = minimapRef.current?.offsetParent as HTMLElement | null
+    if (parent && getComputedStyle(minimapRef.current!).position === 'absolute') {
+      const rect = parent.getBoundingClientRect()
+      return { width: rect.width, height: rect.height, left: rect.left, top: rect.top }
+    }
+    return { width: window.innerWidth, height: window.innerHeight, left: 0, top: 0 }
+  }, [])
+
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
     if (isResizing.current) {
       if (!minimapRef.current) return
@@ -93,24 +127,36 @@ export function MiniMap({
       setHeight(newHeight)
       return
     }
+    if (isResizingTop.current) {
+      const delta = e.clientY - resizeTopStart.current.y
+      const bottom = resizeTopStart.current.top + resizeTopStart.current.height
+      const clampedTop = Math.max(0, resizeTopStart.current.top + delta)
+      const newHeight = Math.max(100, bottom - clampedTop)
+      setHeight(newHeight)
+      setPosition((prev: { top: number; right: number }) => ({ ...prev, top: clampedTop }))
+      return
+    }
     if (isMoving.current) {
-      const newTop = e.clientY - dragOffset.current.y
-      const newRight = window.innerWidth - e.clientX - (60 - dragOffset.current.x)
+      const container = getContainerBounds()
+      const h = minimapRef.current?.offsetHeight || height
+      const newTop = e.clientY - container.top - dragOffset.current.y
+      const newRight = container.width - (e.clientX - container.left) - (60 - dragOffset.current.x)
       setPosition({
-        top: Math.max(50, Math.min(window.innerHeight - 200, newTop)),
-        right: Math.max(10, Math.min(window.innerWidth - 100, newRight))
+        top: Math.max(0, Math.min(container.height - h, newTop)),
+        right: Math.max(0, Math.min(container.width - 100, newRight))
       })
       return
     }
     if (isDragging.current) {
       handleNavigateClick(e)
     }
-  }, [handleNavigateClick])
+  }, [handleNavigateClick, getContainerBounds, height])
 
   useEffect(() => {
     const handleGlobalMouseUp = () => {
       isDragging.current = false
       isResizing.current = false
+      isResizingTop.current = false
       isMoving.current = false
       setIsDraggingState(false)
       setHoverRatio(null)
@@ -121,12 +167,22 @@ export function MiniMap({
         const newHeight = Math.max(100, Math.min(window.innerHeight - 50, e.clientY - rect.top))
         setHeight(newHeight)
       }
+      if (isResizingTop.current) {
+        const delta = e.clientY - resizeTopStart.current.y
+        const bottom = resizeTopStart.current.top + resizeTopStart.current.height
+        const clampedTop = Math.max(0, resizeTopStart.current.top + delta)
+        const newHeight = Math.max(100, bottom - clampedTop)
+        setHeight(newHeight)
+        setPosition((prev: { top: number; right: number }) => ({ ...prev, top: clampedTop }))
+      }
       if (isMoving.current) {
-        const newTop = e.clientY - dragOffset.current.y
-        const newRight = window.innerWidth - e.clientX - (60 - dragOffset.current.x)
+        const container = getContainerBounds()
+        const h = minimapRef.current?.offsetHeight || height
+        const newTop = e.clientY - container.top - dragOffset.current.y
+        const newRight = container.width - (e.clientX - container.left) - (60 - dragOffset.current.x)
         setPosition({
-          top: Math.max(50, Math.min(window.innerHeight - 200, newTop)),
-          right: Math.max(10, Math.min(window.innerWidth - 100, newRight))
+          top: Math.max(0, Math.min(container.height - h, newTop)),
+          right: Math.max(0, Math.min(container.width - 100, newRight))
         })
       }
       // Handle dragging navigation globally
@@ -144,13 +200,13 @@ export function MiniMap({
       window.removeEventListener('mouseup', handleGlobalMouseUp)
       window.removeEventListener('mousemove', handleGlobalMouseMove)
     }
-  }, [onNavigate])
+  }, [onNavigate, getContainerBounds])
 
   useEffect(() => {
     forceUpdate(n => n + 1)
   }, [height])
 
-  const [contentRect, setContentRect] = useState({ top: 20, height: height - 40 })
+  const [contentRect, setContentRect] = useState({ top: 56, height: height - 76 })
 
   useEffect(() => {
     if (contentRef.current) {
@@ -249,6 +305,16 @@ export function MiniMap({
     : Math.floor(visibleStart * totalMessages) + 1
   const showIndicator = isDraggingState && totalMessages > 0
 
+  // Forward wheel events to the scroll container underneath
+  const handleWheel = useCallback((e: React.WheelEvent) => {
+    const scrollContainer = minimapRef.current
+      ?.closest('.conversation-container')
+      ?.querySelector('.virtual-scroll-container') as HTMLElement | null
+    if (scrollContainer) {
+      scrollContainer.scrollTop += e.deltaY
+    }
+  }, [])
+
   return (
     <div
       className="minimap"
@@ -256,8 +322,28 @@ export function MiniMap({
       style={{ top: `${position.top}px`, right: `${position.right}px`, height: `${height}px`, maxHeight: 'none' }}
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
+      onWheel={handleWheel}
     >
+      <div className="minimap-resize-top-handle" title="Drag to resize">═</div>
       <div className="minimap-move-handle" title="Drag to move">⋮⋮</div>
+      {/* Filter bar */}
+      {activeFilters && onToggleFilter && (
+        <div className="minimap-filter-bar" onMouseDown={e => e.stopPropagation()}>
+          {FILTER_TYPES.map(f => {
+            const active = activeFilters.has(f.type)
+            return (
+              <div
+                key={f.type}
+                className={`minimap-filter-item ${active ? 'active' : ''}`}
+                onClick={() => onToggleFilter(f.type)}
+                title={f.label}
+              >
+                <span className="minimap-filter-dot" style={{ background: active ? f.color : 'transparent', borderColor: f.color }} />
+              </div>
+            )
+          })}
+        </div>
+      )}
       {/* Position indicator during drag */}
       {showIndicator && (
         <div
@@ -287,9 +373,16 @@ export function MiniMap({
         ))}
       </div>
       <div className="minimap-content" ref={contentRef}>
-        {items.map((item, i) => (
-          <div key={i} className={`minimap-item minimap-${item.type}`} style={{ flex: `${item.heightRatio} 0 0` }} />
-        ))}
+        {items.map((item, i) => {
+          const filtered = activeFilters && !activeFilters.has(item.type) && item.type !== 'tree-separator'
+          return (
+            <div
+              key={i}
+              className={`minimap-item minimap-${item.type}`}
+              style={{ flex: `${item.heightRatio} 0 0`, opacity: filtered ? 0.08 : 1 }}
+            />
+          )
+        })}
       </div>
       {/* Search result markers */}
       {searchResults.length > 0 && totalMessages > 0 && (

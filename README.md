@@ -50,14 +50,16 @@ Unlike ephemeral chat interfaces, Claude Roam preserves your **complete conversa
 - **Conversation Trees**: Visualize branching conversations with tree separators
 - **No Data Loss**: Every tool call, result, and message is preserved
 
-#### Massive Conversation Management
+#### Desktop App & Massive Conversation Management
 
-Claude Roam is built to handle **extremely large sessions** (10,000+ messages):
+Claude Roam includes a native **Tauri 2 desktop app** built to handle **extremely large sessions** (10,000+ messages):
 
-- **Web Worker Parsing**: Large files are parsed off the main thread - no UI freezing
-- **IndexedDB Caching**: Parsed messages are cached locally for instant reload
+- **Native Desktop App**: Lightweight (~6MB) Tauri 2 app with Rust backend and SQLite
 - **Virtual Scrolling**: Only visible messages are rendered, enabling smooth navigation
-- **Immersive Reading**: Full-screen conversation view with MiniMap navigation
+- **MiniMap with Filters**: Visual overview with clickable color filters by message type
+- **Type Navigation**: Jump between same-type messages (human/assistant/tool) with prev/next arrows
+- **Raw JSON Mode**: Inspect original unparsed message structure for debugging
+- **Import/Export**: Load and save `.roam` files directly from the app
 - **Search & Navigate**: Find any message in massive histories with instant search
 
 #### Knowledge Accumulation
@@ -75,12 +77,13 @@ Your conversations with Claude are valuable knowledge assets:
 - **History Merging**: Combine sessions from multiple sources
 - **Directory Mapping**: Map local paths to cloud directories for seamless sync
 - **Auto Sync (Daemon)**: Background process monitors and uploads changes
+- **Native Desktop App**: Tauri 2 desktop viewer (~6MB) with Rust backend
 - **Large File Support**: Handle sessions with 10,000+ messages smoothly
-- **Immersive UI**: Full-screen conversation view with virtual scrolling
-- **MiniMap Navigation**: Visual overview and quick navigation for large sessions
-- **Local Preview**: Browse sessions in browser without a server
-- **Export/Import**: Portable `.roam` files for offline sharing
-- **Web UI**: Search and browse all synced sessions
+- **Virtual Scrolling**: Full-screen conversation view with smooth navigation
+- **MiniMap with Filters**: Visual overview with message type color filters
+- **Type Navigation**: Jump between same-type messages with prev/next arrows
+- **Raw JSON Mode**: Inspect original message structure for debugging
+- **Export/Import**: Portable `.roam` files, import/export from desktop app
 - **Line-Level Tracking**: Know which machine contributed each part
 - **Cross-Platform**: macOS, Linux, WSL2, Windows
 
@@ -149,12 +152,12 @@ claude-roam pull                                 # Get all old sessions
 claude --resume                                  # Continue where you left off
 ```
 
-#### Workflow 3: Preview & Analyze Large Sessions
+#### Workflow 3: Browse & Analyze Sessions with Desktop App
 
 ```bash
-claude-roam preview              # Open browser with all local sessions
-claude-roam preview file.roam    # Preview exported .roam file
-# Use MiniMap to navigate, Ctrl+F to search through thousands of messages
+claude-roam preview              # Launch the Tauri desktop app
+# Use MiniMap to navigate, filter by message type, search through thousands of messages
+# Import/export .roam files directly from the app
 ```
 
 ### Command Reference
@@ -168,7 +171,7 @@ claude-roam preview file.roam    # Preview exported .roam file
 | `claude-roam list -g` | List grouped by cloud directory |
 | `claude-roam map add <dir>` | Map current directory to cloud directory |
 | `claude-roam map list` | Show all directory mappings |
-| `claude-roam preview` | Preview sessions in browser |
+| `claude-roam preview` | Launch desktop app to browse sessions |
 | `claude-roam export` | Export to .roam file |
 | `claude-roam import` | Import from .roam file |
 | `claude-roam status` | Check sync status |
@@ -278,14 +281,16 @@ claude --resume <session-id>  # 带着完整上下文继续！
 - **对话树可视化**：用分隔符展示分支对话结构
 - **零数据丢失**：每个工具调用、结果和消息都被保留
 
-#### 海量对话管理
+#### 桌面应用 & 海量对话管理
 
-Claude Roam 专为处理**超大会话**（10,000+ 条消息）而设计：
+Claude Roam 包含原生 **Tauri 2 桌面应用**，专为处理**超大会话**（10,000+ 条消息）而设计：
 
-- **Web Worker 解析**：大文件在后台线程解析，UI 不卡顿
-- **IndexedDB 缓存**：解析后的消息本地缓存，秒开重载
+- **原生桌面应用**：轻量级（~6MB）Tauri 2 应用，Rust 后端 + SQLite
 - **虚拟滚动**：只渲染可见消息，实现丝滑导航
-- **沉浸式阅读**：全屏对话视图，配合 MiniMap 导航
+- **MiniMap 筛选**：可视化概览，支持按消息类型颜色筛选
+- **类型导航**：通过上下箭头在同类型消息间快速跳转
+- **Raw JSON 模式**：查看原始未解析的消息结构，方便调试
+- **导入/导出**：直接从桌面应用加载和保存 `.roam` 文件
 - **搜索与定位**：在海量历史中即时搜索任意消息
 
 #### 知识沉淀
@@ -303,12 +308,13 @@ Claude Roam 专为处理**超大会话**（10,000+ 条消息）而设计：
 - **历史合并**：合并来自多个来源的会话
 - **目录映射**：将本地路径映射到云端目录，实现无缝同步
 - **自动同步 (Daemon)**：后台进程监控并上传变更
+- **原生桌面应用**：Tauri 2 桌面查看器（~6MB），Rust 后端
 - **大文件支持**：流畅处理 10,000+ 条消息的会话
-- **沉浸式 UI**：全屏对话视图，虚拟滚动
-- **MiniMap 导航**：可视化概览和快速导航大型会话
-- **本地预览**：无需服务器，在浏览器中浏览会话
-- **导出/导入**：便携式 `.roam` 文件，支持离线分享
-- **Web UI**：搜索和浏览所有同步的会话
+- **虚拟滚动**：全屏对话视图，丝滑导航
+- **MiniMap 筛选**：可视化概览，支持消息类型颜色筛选
+- **类型导航**：通过箭头在同类型消息间快速跳转
+- **Raw JSON 模式**：查看原始消息结构，方便调试
+- **导出/导入**：便携式 `.roam` 文件，支持桌面应用内导入导出
 - **行级来源追踪**：知道哪部分来自哪台机器
 - **跨平台**：macOS、Linux、WSL2、Windows
 
@@ -377,12 +383,12 @@ claude-roam pull                                 # 获取所有旧会话
 claude --resume                                  # 继续之前的对话
 ```
 
-#### 场景 3：预览和分析大型会话
+#### 场景 3：使用桌面应用浏览和分析会话
 
 ```bash
-claude-roam preview              # 在浏览器中打开所有本地会话
-claude-roam preview file.roam    # 预览导出的 .roam 文件
-# 使用 MiniMap 导航，Ctrl+F 在数千条消息中搜索
+claude-roam preview              # 启动 Tauri 桌面应用
+# 使用 MiniMap 导航，按消息类型筛选，在数千条消息中搜索
+# 直接在应用内导入/导出 .roam 文件
 ```
 
 ### 命令参考
@@ -396,7 +402,7 @@ claude-roam preview file.roam    # 预览导出的 .roam 文件
 | `claude-roam list -g` | 按云端目录分组列出 |
 | `claude-roam map add <dir>` | 将当前目录映射到云端目录 |
 | `claude-roam map list` | 显示所有目录映射 |
-| `claude-roam preview` | 在浏览器中预览会话 |
+| `claude-roam preview` | 启动桌面应用浏览会话 |
 | `claude-roam export` | 导出为 .roam 文件 |
 | `claude-roam import` | 从 .roam 文件导入 |
 | `claude-roam status` | 查看同步状态 |

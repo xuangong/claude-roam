@@ -1,0 +1,21 @@
+{
+  "name": "claude-roam-root",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Claude Roam - Session history viewer for Claude Code",
+  "scripts": {
+    "dev": "cd web && npm run dev",
+    "build": "cd web && npm run build",
+    "tauri:dev": "cd web && npm run tauri dev",
+    "tauri:build": "cd web && npm run tauri build",
+    "tauri:icons": "cd src-tauri && tauri icon icons/icon.svg",
+    "install:web": "cd web && npm install",
+    "install:all": "npm run install:web",
+    "cli:dev": "cd cli && bun run dev",
+    "cli:build": "cd cli && bun run build:bin"
+  },
+  "devDependencies": {},
+  "keywords": ["claude", "code", "session", "viewer", "tauri"],
+  "author": "Claude Roam Team",
+  "license": "MIT"
+}

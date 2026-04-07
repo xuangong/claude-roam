@@ -53,9 +53,6 @@ import {
   BackupConfig,
 } from "./state.js";
 
-// Import preview.html as text for bundling
-// @ts-ignore - bun specific import
-import previewHtmlTemplate from "../assets/preview.html" with { type: "text" };
 
 const program = new Command();
 
@@ -1257,130 +1254,110 @@ program
     console.log(`You can now use 'claude-roam push' and 'claude-roam pull' to sync.`);
   });
 
-// Preview command - open .roam file in browser
-program
-  .command("preview [file]")
-  .description("Preview a .roam file in browser (defaults to export + preview)")
-  .option("--no-repair", "Skip broken link check")
-  .action(async (file, options) => {
-    let roamFilePath: string;
-    let tempFile = false;
+/**
+ * Try to find and launch the Tauri desktop app
+ * Returns true if app was launched, false if not found
+ */
+async function tryLaunchTauriApp(): Promise<boolean> {
+  const platform = process.platform;
+  const { exec, execSync } = await import("child_process");
 
-    if (file) {
-      // User specified a file
-      roamFilePath = path.isAbsolute(file) ? file : path.join(process.cwd(), file);
-      if (!fs.existsSync(roamFilePath)) {
-        console.error(`File not found: ${roamFilePath}`);
-        process.exit(1);
-      }
-    } else {
-      // No file specified - export current directory first
-      const currentDir = process.cwd();
-      const encodedDir = encodePathForClaude(currentDir);
-      const sessions = scanLocalSessions();
-      const dirSessions = sessions.filter((s) => s.encodedDir === encodedDir);
+  // Platform-specific app paths
+  const appPaths: string[] = [];
 
-      if (dirSessions.length === 0) {
-        console.error("No sessions found for current directory.");
-        console.log(`\nCurrent directory: ${currentDir}`);
-        console.log("Make sure you have Claude Code sessions in this directory.");
-        process.exit(1);
-      }
+  if (platform === "darwin") {
+    // macOS: Check common installation locations
+    appPaths.push(
+      "/Applications/Claude Roam.app",
+      path.join(os.homedir(), "Applications/Claude Roam.app"),
+      // Development build location
+      path.join(__dirname, "../../src-tauri/target/release/bundle/macos/Claude Roam.app"),
+    );
+  } else if (platform === "win32") {
+    // Windows: Check Program Files and AppData
+    const programFiles = process.env.PROGRAMFILES || "C:\\Program Files";
+    const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData\\Local");
+    appPaths.push(
+      path.join(programFiles, "Claude Roam\\Claude Roam.exe"),
+      path.join(localAppData, "Claude Roam\\Claude Roam.exe"),
+    );
+  } else {
+    // Linux: Check common locations
+    appPaths.push(
+      "/usr/bin/claude-roam",
+      "/usr/local/bin/claude-roam",
+      path.join(os.homedir(), ".local/bin/claude-roam"),
+      path.join(os.homedir(), ".local/share/applications/claude-roam"),
+    );
+  }
 
-      // Check for broken links
-      if (options.repair !== false) {
-        await checkAndPromptRepair(dirSessions);
-      }
-
-      const state = loadState();
-      const sessionsData = dirSessions.map((session) => ({
-        id: session.sessionId,
-        lineCount: session.lineCount,
-        modifiedAt: session.modifiedAt.toISOString(),
-        data: readSessionContent(session.filePath),
-      }));
-
-      const bundle = {
-        version: 2,
-        exportedAt: new Date().toISOString(),
-        source: {
-          machineId: state.machine_id,
-          machineName: state.machine_name,
-          originalPath: currentDir,
-        },
-        sessions: sessionsData,
-      };
-
-      // Write to temp file (cross-platform)
-      const tmpDir = path.join(os.tmpdir(), "claude-roam");
-      if (!fs.existsSync(tmpDir)) {
-        fs.mkdirSync(tmpDir, { recursive: true });
-      }
-      roamFilePath = path.join(tmpDir, `preview-${Date.now()}.roam`);
-      fs.writeFileSync(roamFilePath, JSON.stringify(bundle));
-      tempFile = true;
-
-      console.log(`Found ${sessionsData.length} session(s) for current directory`);
-    }
-
-    // Read .roam file
-    let bundle;
-    try {
-      const content = fs.readFileSync(roamFilePath, "utf-8");
-      bundle = JSON.parse(content);
-    } catch (err) {
-      console.error("Failed to parse .roam file:", err);
-      process.exit(1);
-    }
-
-    // Use embedded preview.html template
-    let previewHtml = previewHtmlTemplate;
-    if (!previewHtml || previewHtml === "") {
-      console.error("Preview template not found in bundle.");
-      process.exit(1);
-    }
-
-    // Inject data using base64 encoding to avoid any HTML/JSON escaping issues
-    // The frontend will decode this
-    // Use replaceAll since the placeholder appears in both JS code and the data tag
-    const jsonData = JSON.stringify(bundle);
-    const base64Data = Buffer.from(jsonData, 'utf-8').toString('base64');
-    previewHtml = previewHtml.replaceAll('__INJECT_ROAM_DATA_BASE64__', base64Data);
-
-    // Write to temp file (cross-platform)
-    const tmpDir = path.join(os.tmpdir(), "claude-roam");
-    if (!fs.existsSync(tmpDir)) {
-      fs.mkdirSync(tmpDir, { recursive: true });
-    }
-    const outputHtml = path.join(tmpDir, `preview-${Date.now()}.html`);
-    fs.writeFileSync(outputHtml, previewHtml);
-
-    // Open in browser
-    const { exec } = await import("child_process");
-    const platform = process.platform;
-    let cmd: string;
-
-    if (platform === "darwin") {
-      cmd = `open "${outputHtml}"`;
-    } else if (platform === "win32") {
-      cmd = `start "" "${outputHtml}"`;
-    } else {
-      cmd = `xdg-open "${outputHtml}"`;
-    }
-
-    exec(cmd, (err) => {
-      if (err) {
-        console.error("Failed to open browser:", err.message);
-        console.log(`\nYou can manually open: ${outputHtml}`);
-      } else {
-        console.log("✓ Opened preview in browser");
-        if (tempFile) {
-          console.log(`  Source: ${bundle.source.machineName}:${bundle.source.originalPath}`);
+  // Find the first existing app
+  for (const appPath of appPaths) {
+    if (fs.existsSync(appPath)) {
+      try {
+        if (platform === "darwin") {
+          // macOS: Use 'open' command
+          exec(`open "${appPath}"`, (err) => {
+            if (err) {
+              console.error("Failed to launch app:", err.message);
+            }
+          });
+        } else if (platform === "win32") {
+          // Windows: Run the executable
+          exec(`"${appPath}"`, (err) => {
+            if (err) {
+              console.error("Failed to launch app:", err.message);
+            }
+          });
         } else {
-          console.log(`  File: ${roamFilePath}`);
+          // Linux: Run the binary
+          exec(`"${appPath}"`, (err) => {
+            if (err) {
+              console.error("Failed to launch app:", err.message);
+            }
+          });
         }
+        return true;
+      } catch {
+        // Continue to next path
       }
-    });
+    }
+  }
+
+  // macOS: Also try using 'open -a' which searches registered apps
+  if (platform === "darwin") {
+    try {
+      execSync('open -a "Claude Roam"', { stdio: 'ignore' });
+      return true;
+    } catch {
+      // App not registered, continue
+    }
+  }
+
+  return false;
+}
+
+// Preview command - open sessions in Tauri app
+program
+  .command("preview")
+  .description("Preview sessions (launches Claude Roam desktop app)")
+  .action(async () => {
+    const currentDir = process.cwd();
+
+    console.log("Looking for Claude Roam desktop app...");
+
+    const launched = await tryLaunchTauriApp();
+    if (launched) {
+      console.log("✓ Launched Claude Roam desktop app");
+      console.log(`  The app will show sessions from: ~/.claude/projects/`);
+      console.log(`\nTip: Use the project filter in the app to view sessions for:`);
+      console.log(`  ${currentDir}`);
+    } else {
+      console.error("Claude Roam desktop app not found.");
+      console.log("\nPlease install the desktop app first:");
+      console.log("  1. Build: cd src-tauri && cargo tauri build");
+      console.log("  2. Install the .app or .dmg from target/release/bundle/");
+    }
   });
 
 // Backup command - backup all sessions locally

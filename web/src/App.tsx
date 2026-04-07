@@ -6,6 +6,7 @@ import RoamPreview from './pages/RoamPreview'
 import AuthCallback from './pages/AuthCallback'
 import LoginPage from './pages/LoginPage'
 import { getCurrentUser, logout, getGitHubLoginUrl, User } from './api'
+import { isLocalDev } from './utils/tauriStore'
 import './App.css'
 
 type Theme = 'light' | 'dark'
@@ -86,8 +87,22 @@ function App() {
     )
   }
 
-  // Not logged in - show login page
-  if (!user) {
+  // Local dev mode - skip login, use mock user
+  const localDevMode = isLocalDev()
+  const mockUser: User = {
+    id: 'local-dev',
+    provider: 'local',
+    provider_id: 'local-dev',
+    email: 'dev@localhost',
+    name: 'Local Dev',
+    avatar_url: null,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  }
+  const effectiveUser = localDevMode ? mockUser : user
+
+  // Not logged in and not in local dev mode - show login page
+  if (!effectiveUser) {
     return (
       <AuthContext.Provider value={authContext}>
         <div className="app">
@@ -111,13 +126,18 @@ function App() {
         <div className="app-header-controls">
           <div className="user-section">
             <div className="user-info">
-              {user.avatar_url && (
-                <img src={user.avatar_url} alt="" className="user-avatar" />
+              {effectiveUser.avatar_url && (
+                <img src={effectiveUser.avatar_url} alt="" className="user-avatar" />
               )}
-              <span className="user-name">{user.name || user.email || 'User'}</span>
-              <button className="logout-btn" onClick={handleLogout}>
-                Logout
-              </button>
+              <span className="user-name">{effectiveUser.name || effectiveUser.email || 'User'}</span>
+              {!localDevMode && (
+                <button className="logout-btn" onClick={handleLogout}>
+                  Logout
+                </button>
+              )}
+              {localDevMode && (
+                <span className="dev-badge" style={{ marginLeft: 8, padding: '2px 6px', background: '#f0ad4e', borderRadius: 4, fontSize: 11 }}>DEV</span>
+              )}
             </div>
           </div>
           <button className="theme-toggle" onClick={toggleTheme} title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}>

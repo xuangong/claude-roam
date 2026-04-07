@@ -13,45 +13,41 @@ import {
   MessageCache
 } from '../utils/messageStore'
 import { createParserWorker } from '../utils/parserWorker'
+import {
+  isTauri,
+  getSession,
+  getMessagesRange,
+  type SessionMeta as TauriSessionMeta,
+} from '../utils/tauriStore'
+
+// Props interface for Tauri mode
+interface SessionDetailProps {
+  sessionId?: string
+  useTauri?: boolean
+  onExport?: () => void
+}
 
 // Estimate message height based on type char (from typeString)
+// Overestimate rather than underestimate to prevent content truncation
 function estimateHeightByType(typeChar: string): number {
   switch (typeChar) {
-    case 'h': return 80   // human
-    case 'a': return 150  // assistant
-    case 'c': return 50   // tool_call
-    case 'r': return 80   // tool_result
-    case 's': return 40   // tree-separator
-    case 'y': return 40   // system
-    default: return 60
+    case 'h': return 150   // human
+    case 'a': return 300   // assistant
+    case 'c': return 80    // tool_call
+    case 'r': return 200   // tool_result
+    case 's': return 40    // tree-separator
+    case 'y': return 60    // system
+    default: return 120
   }
 }
 
-// Estimate message height from actual message content
-function estimateMessageHeight(msg: DisplayMessage | null, typeChar?: string): number {
-  if (!msg) {
-    return typeChar ? estimateHeightByType(typeChar) : 60
-  }
-  switch (msg.displayType) {
-    case 'human': {
-      const textLen = msg.blocks.reduce((acc, b) => acc + (b.type === 'text' ? b.content.length : 0), 0)
-      return Math.max(60, Math.min(400, 60 + Math.floor(textLen / 80) * 20))
-    }
-    case 'assistant': {
-      const textLen = msg.blocks.reduce((acc, b) => acc + (b.type === 'text' ? b.content.length : 0), 0)
-      return Math.max(60, Math.min(600, 60 + Math.floor(textLen / 80) * 20))
-    }
-    case 'tool_call': return 50
-    case 'tool_result': return 80
-    case 'tree-separator': return 40
-    case 'system': return 40
-    default: return 60
-  }
-}
+function SessionDetail({ sessionId: propSessionId, useTauri: propUseTauri, onExport }: SessionDetailProps = {}) {
+  const params = useParams<{ id: string }>()
+  const id = propSessionId || params.id
+  const useTauriMode = propUseTauri ?? isTauri()
 
-function SessionDetail() {
-  const { id } = useParams<{ id: string }>()
   const [detail, setDetail] = useState<SessionDetailResponse | null>(null)
+  const [tauriSession, setTauriSession] = useState<TauriSessionMeta | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -74,6 +70,30 @@ function SessionDetail() {
   const [searchResults, setSearchResults] = useState<number[]>([])
   const [currentSearchIndex, setCurrentSearchIndex] = useState(-1)
   const [showSearch, setShowSearch] = useState(false)
+  const [showMinimap, setShowMinimap] = useState(() => {
+    const saved = localStorage.getItem('minimap-visible')
+    return saved !== null ? saved === 'true' : true
+  })
+  const [minimapFilters, setMinimapFilters] = useState<Set<string>>(() => {
+    const saved = localStorage.getItem('minimap-filters')
+    if (saved) {
+      try { return new Set(JSON.parse(saved)) } catch { /* ignore */ }
+    }
+    return new Set(['human', 'assistant', 'tool_call', 'tool_result', 'system'])
+  })
+
+  const toggleMinimapFilter = useCallback((type: string) => {
+    setMinimapFilters(prev => {
+      const next = new Set(prev)
+      if (next.has(type)) {
+        if (next.size > 1) next.delete(type) // keep at least one active
+      } else {
+        next.add(type)
+      }
+      localStorage.setItem('minimap-filters', JSON.stringify([...next]))
+      return next
+    })
+  }, [])
 
   // Handle keyboard shortcuts
   useEffect(() => {
@@ -87,53 +107,62 @@ function SessionDetail() {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [])
 
-  // Virtual list setup
+  // Virtual list setup - estimateSize must be stable (no dependency on visibleMessages)
+  // to avoid feedback loops: load messages → height change → scroll shift → reload
   const virtualizer = useVirtualizer({
-    count: totalMessages,
+    count: loading ? 0 : totalMessages,
     getScrollElement: () => parentRef.current,
-    estimateSize: (index) => estimateMessageHeight(visibleMessages.get(index) || null, typeString[index]),
+    estimateSize: (index) => estimateHeightByType(typeString?.[index] || 'a'),
     overscan: 20,
   })
 
-  // Update visible range for minimap
+  // Update visible range for minimap (browser mode: from virtualizer)
   useEffect(() => {
+    if (useTauriMode) return  // Tauri mode uses scroll events instead
     const range = virtualizer.range
     if (range && totalMessages > 0) {
       setVisibleStart(range.startIndex / totalMessages)
       setVisibleEnd(Math.min(1, (range.endIndex + 1) / totalMessages))
     }
-  }, [virtualizer.range, totalMessages])
+  }, [virtualizer.range, totalMessages, useTauriMode])
+
+  // Update visible range for minimap (Tauri mode: find visible message indices)
+  useEffect(() => {
+    if (!useTauriMode) return
+    const el = parentRef.current
+    if (!el) return
+
+    const handleScroll = () => {
+      if (totalMessages <= 0) return
+      const rect = el.getBoundingClientRect()
+
+      // Find message elements at top and bottom of viewport
+      const getIndexAt = (y: number): number => {
+        let element = document.elementFromPoint(rect.left + rect.width / 3, y) as Element | null
+        while (element && element !== el) {
+          const idx = element.getAttribute?.('data-index')
+          if (idx !== null && idx !== undefined) return parseInt(idx)
+          element = element.parentElement
+        }
+        return -1
+      }
+
+      const firstIdx = getIndexAt(rect.top + 5)
+      const lastIdx = getIndexAt(rect.bottom - 5)
+
+      if (firstIdx >= 0 && totalMessages > 0) {
+        setVisibleStart(firstIdx / totalMessages)
+        setVisibleEnd(Math.min(1, ((lastIdx >= 0 ? lastIdx : firstIdx) + 1) / totalMessages))
+      }
+    }
+
+    handleScroll()  // Initial
+    el.addEventListener('scroll', handleScroll, { passive: true })
+    return () => el.removeEventListener('scroll', handleScroll)
+  }, [useTauriMode, totalMessages, loading])
 
   // Track last loaded range to avoid unnecessary updates
   const lastLoadedRangeRef = useRef<{ start: number; end: number } | null>(null)
-
-  // Load visible messages from IndexedDB
-  useEffect(() => {
-    if (isParsingData || totalMessages === 0 || !cacheRef.current) return
-
-    const range = virtualizer.range
-    if (!range) return
-
-    const start = Math.max(0, range.startIndex - 50)
-    const end = Math.min(totalMessages - 1, range.endIndex + 50)
-
-    // Skip if we've already loaded this range
-    const lastRange = lastLoadedRangeRef.current
-    if (lastRange && start >= lastRange.start && end <= lastRange.end) {
-      return
-    }
-
-    // Prefetch and update visible messages
-    cacheRef.current.prefetch(Math.floor((start + end) / 2), totalMessages).then(() => {
-      const newVisible = new Map<number, DisplayMessage>()
-      for (let i = start; i <= end; i++) {
-        const msg = cacheRef.current?.getIfCached(i)
-        if (msg) newVisible.set(i, msg)
-      }
-      lastLoadedRangeRef.current = { start, end }
-      setVisibleMessages(newVisible)
-    })
-  }, [virtualizer.range, isParsingData, totalMessages])
 
   // Build minimap items - merge adjacent same-type messages
   const minimapItems = useMemo<MiniMapItem[]>(() => {
@@ -196,7 +225,7 @@ function SessionDetail() {
 
   // Search effect - search through all cached messages when query changes
   useEffect(() => {
-    if (!searchQuery.trim() || !cacheRef.current || totalMessages === 0) {
+    if (!searchQuery.trim() || totalMessages === 0) {
       setSearchResults([])
       setCurrentSearchIndex(-1)
       return
@@ -205,39 +234,65 @@ function SessionDetail() {
     const query = searchQuery.toLowerCase()
     const results: number[] = []
 
-    // Search through all cached messages
+    // Search through all messages (Tauri: visibleMessages, Browser: cache)
     for (let i = 0; i < totalMessages; i++) {
-      const msg = cacheRef.current.getIfCached(i)
+      const msg = useTauriMode ? visibleMessages.get(i) : cacheRef.current?.getIfCached(i)
       if (msg) {
+        // Search all text content in blocks
+        let found = false
         for (const block of msg.blocks) {
-          if (block.type === 'text' && block.content.toLowerCase().includes(query)) {
-            results.push(i)
-            break
-          } else if (block.type === 'tool_use' && block.name.toLowerCase().includes(query)) {
-            results.push(i)
-            break
-          } else if (block.type === 'tool_result' && block.content.toLowerCase().includes(query)) {
-            results.push(i)
+          const searchable = [
+            block.type === 'text' ? block.content : '',
+            block.type === 'tool_use' ? block.name : '',
+            block.type === 'tool_result' ? block.content : '',
+          ].join(' ')
+          if (searchable.toLowerCase().includes(query)) {
+            found = true
             break
           }
         }
+        // Also search top-level fields (Tauri messages may have content outside blocks)
+        if (!found) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const raw = msg as any
+          const extras = [
+            raw.toolContent, raw.thinkingContent, raw.stdout, raw.stderr
+          ].filter(Boolean).join(' ')
+          if (extras.toLowerCase().includes(query)) {
+            found = true
+          }
+        }
+        if (found) results.push(i)
       }
     }
 
     setSearchResults(results)
     if (results.length > 0) {
       setCurrentSearchIndex(0)
-      virtualizer.scrollToIndex(results[0], { align: 'center' })
+      if (useTauriMode) {
+        // Tauri: scroll to element by data-index
+        const el = parentRef.current?.querySelector(`[data-index="${results[0]}"]`) as HTMLElement | null
+        el?.scrollIntoView({ block: 'center' })
+      } else {
+        virtualizer.scrollToIndex(results[0], { align: 'center' })
+      }
     } else {
       setCurrentSearchIndex(-1)
     }
-  }, [searchQuery, totalMessages, virtualizer])
+  }, [searchQuery, totalMessages, virtualizer, useTauriMode, visibleMessages])
 
   // Ref to track ongoing search scroll target
   const searchScrollTargetRef = useRef<number | null>(null)
 
   // Scroll to search result with retry logic for virtual scrolling
   const scrollToSearchResult = useCallback((messageIndex: number) => {
+    if (useTauriMode) {
+      // Tauri: scroll to element by data-index
+      const el = parentRef.current?.querySelector(`[data-index="${messageIndex}"]`) as HTMLElement | null
+      el?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+      return
+    }
+
     searchScrollTargetRef.current = messageIndex
 
     const scrollToTarget = () => {
@@ -261,7 +316,7 @@ function SessionDetail() {
     if (cacheRef.current) {
       cacheRef.current.prefetch(messageIndex, totalMessages)
     }
-  }, [virtualizer, totalMessages])
+  }, [virtualizer, totalMessages, useTauriMode])
 
   // Navigate search results
   const goToNextResult = useCallback(() => {
@@ -298,6 +353,14 @@ function SessionDetail() {
   const handleMinimapNavigate = useCallback((ratio: number) => {
     if (!parentRef.current || totalMessages === 0) return
 
+    if (useTauriMode) {
+      // Tauri mode: ratio is message index ratio, scroll to that message
+      const targetIndex = Math.floor(ratio * totalMessages)
+      const el = parentRef.current.querySelector(`[data-index="${targetIndex}"]`) as HTMLElement | null
+      if (el) el.scrollIntoView({ block: 'start' })
+      return
+    }
+
     const targetIndex = Math.floor(ratio * totalMessages)
     scrollTargetRef.current = ratio
 
@@ -319,7 +382,7 @@ function SessionDetail() {
     if (cacheRef.current) {
       cacheRef.current.prefetch(targetIndex, totalMessages)
     }
-  }, [totalMessages, virtualizer])
+  }, [totalMessages, virtualizer, useTauriMode])
 
   // Clear cache and refresh
   const handleRefreshCache = useCallback(async () => {
@@ -329,6 +392,16 @@ function SessionDetail() {
     setRefreshKey(k => k + 1)
   }, [id])
 
+  // Scroll to a specific message by index (for type navigation)
+  const scrollToMessage = useCallback((index: number) => {
+    if (useTauriMode) {
+      const el = parentRef.current?.querySelector(`[data-index="${index}"]`) as HTMLElement | null
+      el?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    } else {
+      virtualizer.scrollToIndex(index, { align: 'center' })
+    }
+  }, [useTauriMode, virtualizer])
+
   // Fetch session data and parse with Web Worker
   useEffect(() => {
     if (!id) return
@@ -336,6 +409,41 @@ function SessionDetail() {
     let cancelled = false
     let worker: Worker | null = null
 
+    // Tauri mode: load from native backend
+    async function fetchTauriData() {
+      try {
+        setLoading(true)
+        setError(null)
+
+        const session = await getSession(id!)
+        if (cancelled || !session) {
+          if (!cancelled && !session) {
+            setError('Session not found')
+          }
+          setLoading(false)
+          return
+        }
+
+        setTauriSession(session)
+        setTotalMessages(session.messageCount)
+        setTypeString(session.typeString || '')
+
+        // Load ALL messages at once - no virtual scrolling needed for local data
+        const allMessages = await getMessagesRange(id!, 0, session.messageCount)
+        const allVisible = new Map<number, DisplayMessage>()
+        allMessages.forEach((msg, i) => allVisible.set(i, msg))
+        setVisibleMessages(allVisible)
+
+        setLoading(false)
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : 'Failed to load session')
+          setLoading(false)
+        }
+      }
+    }
+
+    // Browser mode: fetch from API and parse with Web Worker
     async function fetchAndParse(forceReparse = false) {
       try {
         setLoading(true)
@@ -427,14 +535,45 @@ function SessionDetail() {
       }
     }
 
-    fetchAndParse(refreshKey > 0)
+    // Choose mode based on environment
+    if (useTauriMode) {
+      fetchTauriData()
+    } else {
+      fetchAndParse(refreshKey > 0)
+    }
 
     return () => {
       cancelled = true
       worker?.terminate()
       cacheRef.current?.clear()
     }
-  }, [id, refreshKey])
+  }, [id, refreshKey, useTauriMode])
+
+  // Browser mode only: load visible messages on scroll
+  useEffect(() => {
+    if (useTauriMode || loading || totalMessages === 0 || isParsingData || !cacheRef.current) return
+
+    const range = virtualizer.range
+    if (!range) return
+
+    const start = Math.max(0, range.startIndex - 50)
+    const end = Math.min(totalMessages - 1, range.endIndex + 50)
+
+    const lastRange = lastLoadedRangeRef.current
+    if (lastRange && start >= lastRange.start && end <= lastRange.end) {
+      return
+    }
+
+    cacheRef.current.prefetch(Math.floor((start + end) / 2), totalMessages).then(() => {
+      const newVisible = new Map<number, DisplayMessage>()
+      for (let i = start; i <= end; i++) {
+        const msg = cacheRef.current?.getIfCached(i)
+        if (msg) newVisible.set(i, msg)
+      }
+      lastLoadedRangeRef.current = { start, end }
+      setVisibleMessages(newVisible)
+    })
+  }, [useTauriMode, virtualizer.range, isParsingData, totalMessages, loading])
 
   if (loading || isParsingData) {
     return (
@@ -477,24 +616,37 @@ function SessionDetail() {
     )
   }
 
-  if (!detail) {
+  // In browser mode, detail is required. In Tauri mode, tauriSession is used.
+  if (!useTauriMode && !detail) {
+    return null
+  }
+  if (useTauriMode && !tauriSession) {
     return null
   }
 
   const virtualItems = virtualizer.getVirtualItems()
   const totalSize = virtualizer.getTotalSize()
 
+  // Get session info from appropriate source
+  const sessionId = useTauriMode ? tauriSession!.id : detail!.session.session_id
+  const sessionCreatedAt = useTauriMode
+    ? (tauriSession!.createdAt || new Date(tauriSession!.lastModified).toISOString())
+    : detail!.session.created_at
+  const sessionUpdatedAt = useTauriMode
+    ? (tauriSession!.updatedAt || new Date(tauriSession!.lastModified).toISOString())
+    : detail!.session.updated_at
+
   return (
     <div className="detail-page">
       <Link to="/" className="back-link">Back to sessions</Link>
 
       <div className="detail-header">
-        <h1>{detail.session.session_id}</h1>
+        <h1>{sessionId}</h1>
         <div className="detail-meta">
-          <span>{detail.session.total_lines} lines</span>
+          {!useTauriMode && <span>{detail!.session.total_lines} lines</span>}
           <span>{totalMessages} messages</span>
-          <span>Created: {formatDateTime(detail.session.created_at)}</span>
-          <span>Updated: {formatDateTime(detail.session.updated_at)}</span>
+          <span>Created: {formatDateTime(sessionCreatedAt)}</span>
+          <span>Updated: {formatDateTime(sessionUpdatedAt)}</span>
           <button
             onClick={() => setShowSearch(true)}
             style={{
@@ -525,6 +677,42 @@ function SessionDetail() {
           >
             ↻ Refresh
           </button>
+          <button
+            onClick={() => {
+              const next = !showMinimap
+              setShowMinimap(next)
+              localStorage.setItem('minimap-visible', String(next))
+            }}
+            style={{
+              padding: 'var(--space-1) var(--space-2)',
+              fontSize: '12px',
+              cursor: 'pointer',
+              background: showMinimap ? 'var(--bg-tertiary)' : 'var(--bg-hover)',
+              border: '1px solid var(--border-default)',
+              borderRadius: 'var(--radius-sm)',
+              color: 'var(--text-secondary)',
+            }}
+            title={showMinimap ? 'Hide minimap' : 'Show minimap'}
+          >
+            {showMinimap ? '▮ Map' : '▯ Map'}
+          </button>
+          {onExport && (
+            <button
+              onClick={onExport}
+              style={{
+                padding: 'var(--space-1) var(--space-2)',
+                fontSize: '12px',
+                cursor: 'pointer',
+                background: 'var(--bg-tertiary)',
+                border: '1px solid var(--border-default)',
+                borderRadius: 'var(--radius-sm)',
+                color: 'var(--text-secondary)',
+              }}
+              title="Export this session to .roam file"
+            >
+              ⬇ Export
+            </button>
+          )}
         </div>
       </div>
 
@@ -540,31 +728,34 @@ function SessionDetail() {
         />
       )}
 
-      <div className="section">
-        <h2>Source History</h2>
-        <table className="segments-table">
-          <thead>
-            <tr>
-              <th>Lines</th>
-              <th>Machine</th>
-              <th>Path</th>
-              <th>Pushed</th>
-            </tr>
-          </thead>
-          <tbody>
-            {detail.segments.map((seg: Segment) => (
-              <tr key={seg.id}>
-                <td>{seg.from_line}–{seg.to_line}</td>
-                <td>{seg.machine_name || seg.machine_id.slice(0, 8)}</td>
-                <td style={{ maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  {seg.original_path || '—'}
-                </td>
-                <td>{formatDateTime(seg.pushed_at)}</td>
+      {/* Source History - only shown in browser mode */}
+      {!useTauriMode && detail && (
+        <div className="section">
+          <h2>Source History</h2>
+          <table className="segments-table">
+            <thead>
+              <tr>
+                <th>Lines</th>
+                <th>Machine</th>
+                <th>Path</th>
+                <th>Pushed</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody>
+              {detail.segments.map((seg: Segment) => (
+                <tr key={seg.id}>
+                  <td>{seg.from_line}–{seg.to_line}</td>
+                  <td>{seg.machine_name || seg.machine_id.slice(0, 8)}</td>
+                  <td style={{ maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {seg.original_path || '—'}
+                  </td>
+                  <td>{formatDateTime(seg.pushed_at)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       <div className="section conversation-section conversation-section-immersive">
         <h2>Conversation</h2>
@@ -577,7 +768,27 @@ function SessionDetail() {
               <div className="empty-conversation">
                 No conversation data to display
               </div>
+            ) : useTauriMode ? (
+              /* Tauri mode: render all messages directly, no virtual scrolling */
+              <div style={{ width: '100%' }}>
+                {Array.from({ length: totalMessages }, (_, i) => {
+                  const msg = visibleMessages.get(i) || null
+                  return (
+                    <div key={i} data-index={i}>
+                      <MessageRow
+                        msg={msg}
+                        searchQuery={searchQuery}
+                        isSearchMatch={searchResults.includes(i)}
+                        messageIndex={i}
+                        typeString={typeString}
+                        onScrollToMessage={scrollToMessage}
+                      />
+                    </div>
+                  )
+                })}
+              </div>
             ) : (
+              /* Browser mode: virtual scrolling */
               <div
                 style={{
                   height: `${totalSize}px`,
@@ -604,6 +815,9 @@ function SessionDetail() {
                         msg={msg}
                         searchQuery={searchQuery}
                         isSearchMatch={searchResults.includes(virtualRow.index)}
+                        messageIndex={virtualRow.index}
+                        typeString={typeString}
+                        onScrollToMessage={scrollToMessage}
                       />
                     </div>
                   )
@@ -611,7 +825,7 @@ function SessionDetail() {
               </div>
             )}
           </div>
-          {totalMessages > 0 && (
+          {showMinimap && totalMessages > 0 && (
             <MiniMap
               items={minimapItems}
               visibleStart={visibleStart}
@@ -621,6 +835,8 @@ function SessionDetail() {
               searchResults={searchResults}
               currentSearchIndex={currentSearchIndex}
               onSearchResultClick={handleSearchResultClick}
+              activeFilters={minimapFilters}
+              onToggleFilter={toggleMinimapFilter}
             />
           )}
         </div>
