@@ -133,10 +133,28 @@ export function createParserWorker(): Worker {
             stopReason: obj.stopReason,
             hasOutput: obj.hasOutput
           };
+        } else if (subtype === 'api_error') {
+          const error = obj.error || {};
+          const cause = (typeof error === 'object' && error.cause) || {};
+          const status = error.status || cause.status || '';
+          const code = cause.code || '';
+          const retryAttempt = obj.retryAttempt || '';
+          const maxRetries = obj.maxRetries || '';
+          const errorMsg = (typeof error === 'object' && error.error && error.error.message) || '';
+
+          let summary = '';
+          if (status) summary += 'HTTP ' + status + ' ';
+          if (code) summary += code + ' ';
+          if (errorMsg) summary += errorMsg.substring(0, 100) + ' ';
+          summary += '(retry ' + retryAttempt + '/' + maxRetries + ')';
+
+          displayContent = summary.trim();
+          jsonDetails = { subtype, error: obj.error, retryAttempt, maxRetries, level: obj.level };
         } else if (content) {
           displayContent = content;
         }
 
+        const isApiError = subtype === 'api_error';
         const blocks = [];
         if (displayContent) {
           blocks.push({ type: 'text', content: truncate(displayContent, 5000) });
@@ -146,7 +164,7 @@ export function createParserWorker(): Worker {
         }
 
         results.push({
-          displayType: 'system',
+          displayType: isApiError ? 'error' : 'system',
           blocks: blocks
         });
         return results;
@@ -431,7 +449,8 @@ export function createParserWorker(): Worker {
                           msg.displayType === 'tool_call' ? 'c' :
                           msg.displayType === 'tool_result' ? 'r' :
                           msg.displayType === 'tree-separator' ? 's' :
-                          msg.displayType === 'system' ? 'y' : 'a';
+                          msg.displayType === 'system' ? 'y' :
+                          msg.displayType === 'error' ? 'e' : 'a';
           messageTypes.push(typeChar);
           totalMessages++;
           if (currentChunk.length >= CHUNK_SIZE) {

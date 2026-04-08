@@ -46,6 +46,8 @@ pub struct RawMessage {
 pub struct MessageContent {
     pub role: String,
     pub content: Vec<ContentBlock>,
+    #[serde(default)]
+    pub usage: Option<serde_json::Value>,
 }
 
 /// Summary record type
@@ -69,12 +71,32 @@ pub struct FileHistorySnapshot {
     pub snapshot: serde_json::Value,
 }
 
+/// System record type (api_error, compact_boundary, etc.)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemRecord {
+    pub uuid: String,
+    #[serde(rename = "parentUuid")]
+    pub parent_uuid: Option<String>,
+    pub timestamp: Option<String>,
+    #[serde(rename = "type")]
+    pub record_type: String,
+    pub subtype: Option<String>,
+    pub error: Option<serde_json::Value>,
+    #[serde(rename = "retryAttempt")]
+    pub retry_attempt: Option<u32>,
+    #[serde(rename = "maxRetries")]
+    pub max_retries: Option<u32>,
+    pub level: Option<String>,
+    pub content: Option<String>,
+}
+
 /// JSONL line type - can be message, summary, or file history
 #[derive(Debug, Clone)]
 pub enum JsonlLine {
     Message(RawMessage),
     Summary(SummaryRecord),
     FileHistory(FileHistorySnapshot),
+    System(SystemRecord),
     Unknown(serde_json::Value),
 }
 
@@ -97,6 +119,11 @@ pub fn parse_jsonl_file(path: &Path) -> Result<Vec<DisplayMessage>> {
                 let display_messages = convert_to_display_messages(&raw, &mut tree_index);
                 messages.extend(display_messages);
             }
+            Ok(JsonlLine::System(sys)) => {
+                if let Some(msg) = convert_system_to_display_message(&sys, &mut tree_index) {
+                    messages.push(msg);
+                }
+            }
             Ok(JsonlLine::Summary(_)) | Ok(JsonlLine::FileHistory(_)) | Ok(JsonlLine::Unknown(_)) => {
                 // Skip non-message records
             }
@@ -113,13 +140,7 @@ pub fn parse_jsonl_file(path: &Path) -> Result<Vec<DisplayMessage>> {
 pub fn parse_jsonl_line(line: &str) -> Result<JsonlLine> {
     let value: serde_json::Value = serde_json::from_str(line)?;
 
-    // Check if it's a message (has uuid field)
-    if value.get("uuid").is_some() {
-        let raw: RawMessage = serde_json::from_value(value)?;
-        return Ok(JsonlLine::Message(raw));
-    }
-
-    // Check record type
+    // Check record type first
     if let Some(type_str) = value.get("type").and_then(|v| v.as_str()) {
         match type_str {
             "summary" => {
@@ -130,8 +151,23 @@ pub fn parse_jsonl_line(line: &str) -> Result<JsonlLine> {
                 let snapshot: FileHistorySnapshot = serde_json::from_value(value)?;
                 return Ok(JsonlLine::FileHistory(snapshot));
             }
+            "system" => {
+                // System messages (api_error, compact_boundary, etc.)
+                if value.get("uuid").is_some() {
+                    if let Ok(sys) = serde_json::from_value::<SystemRecord>(value.clone()) {
+                        return Ok(JsonlLine::System(sys));
+                    }
+                }
+                return Ok(JsonlLine::Unknown(value));
+            }
             _ => {}
         }
+    }
+
+    // Check if it's a message (has uuid and message fields)
+    if value.get("uuid").is_some() && value.get("message").is_some() {
+        let raw: RawMessage = serde_json::from_value(value)?;
+        return Ok(JsonlLine::Message(raw));
     }
 
     Ok(JsonlLine::Unknown(value))
@@ -191,6 +227,144 @@ fn convert_to_display_messages(raw: &RawMessage, tree_index: &mut u32) -> Vec<Di
     display_messages
 }
 
+/// Convert a system record (api_error) to a display message
+fn convert_system_to_display_message(sys: &SystemRecord, tree_index: &mut u32) -> Option<DisplayMessage> {
+    let subtype = sys.subtype.as_deref().unwrap_or("");
+
+    if subtype != "api_error" {
+        return None;
+    }
+
+    // Build readable summary from error details
+    let mut summary = String::new();
+    if let Some(error) = &sys.error {
+        if let Some(status) = error.get("status").and_then(|v| v.as_u64()) {
+            summary.push_str(&format!("HTTP {} ", status));
+        }
+        if let Some(cause) = error.get("cause") {
+            if let Some(code) = cause.get("code").and_then(|v| v.as_str()) {
+                summary.push_str(code);
+                summary.push(' ');
+            }
+        }
+        // Extract nested error message
+        if let Some(err_obj) = error.get("error") {
+            if let Some(msg) = err_obj.get("message").and_then(|v| v.as_str()) {
+                let truncated = if msg.len() > 100 { &msg[..100] } else { msg };
+                summary.push_str(truncated);
+                summary.push(' ');
+            }
+        }
+    }
+    if let Some(retry) = sys.retry_attempt {
+        let max = sys.max_retries.unwrap_or(0);
+        summary.push_str(&format!("(retry {}/{})", retry, max));
+    }
+
+    let text = summary.trim().to_string();
+
+    let msg = DisplayMessage {
+        display_type: DisplayType::Error,
+        uuid: sys.uuid.clone(),
+        parent_uuid: sys.parent_uuid.clone(),
+        timestamp: sys.timestamp.clone(),
+        tree_index: *tree_index,
+        blocks: vec![ContentBlock::Text { text }],
+        tool_name: None,
+        tool_id: None,
+        tool_input: None,
+        tool_content: None,
+        stdout: None,
+        stderr: None,
+        return_code: None,
+        thinking_content: None,
+    };
+
+    *tree_index += 1;
+    Some(msg)
+}
+
+/// Parse result containing both messages and stats (single-pass)
+pub struct ParseResult {
+    pub messages: Vec<DisplayMessage>,
+    pub line_count: u32,
+    pub message_count: u32,
+    pub first_human_message: Option<String>,
+    pub type_string: String,
+}
+
+/// Parse a JSONL file in a single pass, returning both messages and stats
+pub fn parse_jsonl_file_with_stats(path: &Path) -> Result<ParseResult> {
+    let file = File::open(path).context("Failed to open JSONL file")?;
+    let reader = BufReader::new(file);
+    let mut messages = Vec::new();
+    let mut tree_index: u32 = 0;
+    let mut line_count: u32 = 0;
+    let mut first_human_message: Option<String> = None;
+    let mut type_string = String::new();
+
+    for (line_num, line) in reader.lines().enumerate() {
+        let line = line.context(format!("Failed to read line {}", line_num + 1))?;
+
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        line_count += 1;
+
+        match parse_jsonl_line(&line) {
+            Ok(JsonlLine::Message(raw)) => {
+                // Collect first human message
+                if first_human_message.is_none() && raw.message.role == "user" {
+                    for block in &raw.message.content {
+                        if let ContentBlock::Text { text } = block {
+                            first_human_message = Some(truncate_string(text, 200));
+                            break;
+                        }
+                    }
+                }
+
+                // Build type string per content block
+                for block in &raw.message.content {
+                    let type_char = match block {
+                        ContentBlock::Text { .. } => {
+                            if raw.message.role == "user" { 'h' } else { 'a' }
+                        }
+                        ContentBlock::ToolUse { .. } | ContentBlock::ServerToolUse { .. } => 'c',
+                        ContentBlock::ToolResult { .. } => 'r',
+                        ContentBlock::Thinking { .. } => 'y',
+                        ContentBlock::CodeExecutionResult { .. } => 'y',
+                    };
+                    type_string.push(type_char);
+                }
+
+                let display_messages = convert_to_display_messages(&raw, &mut tree_index);
+                messages.extend(display_messages);
+            }
+            Ok(JsonlLine::System(sys)) => {
+                if let Some(msg) = convert_system_to_display_message(&sys, &mut tree_index) {
+                    messages.push(msg);
+                    type_string.push('e');
+                }
+            }
+            Ok(JsonlLine::Summary(_)) | Ok(JsonlLine::FileHistory(_)) | Ok(JsonlLine::Unknown(_)) => {}
+            Err(e) => {
+                log::warn!("Failed to parse line {}: {}", line_num + 1, e);
+            }
+        }
+    }
+
+    let message_count = messages.len() as u32;
+
+    Ok(ParseResult {
+        messages,
+        line_count,
+        message_count,
+        first_human_message,
+        type_string,
+    })
+}
+
 /// Get line count and message count for a JSONL file
 pub fn get_file_stats(path: &Path) -> Result<(u32, u32, Option<String>, String)> {
     let file = File::open(path).context("Failed to open JSONL file")?;
@@ -208,33 +382,42 @@ pub fn get_file_stats(path: &Path) -> Result<(u32, u32, Option<String>, String)>
 
         line_count += 1;
 
-        if let Ok(JsonlLine::Message(raw)) = parse_jsonl_line(&line) {
-            // Get first human message
-            if first_human_message.is_none() && raw.message.role == "user" {
-                for block in &raw.message.content {
-                    if let ContentBlock::Text { text } = block {
-                        // Truncate to ~200 chars, respecting UTF-8 boundaries
-                        let preview = truncate_string(text, 200);
-                        first_human_message = Some(preview);
-                        break;
+        match parse_jsonl_line(&line) {
+            Ok(JsonlLine::Message(raw)) => {
+                // Get first human message
+                if first_human_message.is_none() && raw.message.role == "user" {
+                    for block in &raw.message.content {
+                        if let ContentBlock::Text { text } = block {
+                            // Truncate to ~200 chars, respecting UTF-8 boundaries
+                            let preview = truncate_string(text, 200);
+                            first_human_message = Some(preview);
+                            break;
+                        }
                     }
                 }
-            }
 
-            // Build type string per content block (matching display message expansion)
-            for block in &raw.message.content {
-                message_count += 1;
-                let type_char = match block {
-                    ContentBlock::Text { .. } => {
-                        if raw.message.role == "user" { 'h' } else { 'a' }
-                    }
-                    ContentBlock::ToolUse { .. } | ContentBlock::ServerToolUse { .. } => 'c',
-                    ContentBlock::ToolResult { .. } => 'r',
-                    ContentBlock::Thinking { .. } => 'y',
-                    ContentBlock::CodeExecutionResult { .. } => 'y',
-                };
-                type_string.push(type_char);
+                // Build type string per content block (matching display message expansion)
+                for block in &raw.message.content {
+                    message_count += 1;
+                    let type_char = match block {
+                        ContentBlock::Text { .. } => {
+                            if raw.message.role == "user" { 'h' } else { 'a' }
+                        }
+                        ContentBlock::ToolUse { .. } | ContentBlock::ServerToolUse { .. } => 'c',
+                        ContentBlock::ToolResult { .. } => 'r',
+                        ContentBlock::Thinking { .. } => 'y',
+                        ContentBlock::CodeExecutionResult { .. } => 'y',
+                    };
+                    type_string.push(type_char);
+                }
             }
+            Ok(JsonlLine::System(sys)) => {
+                if sys.subtype.as_deref() == Some("api_error") {
+                    message_count += 1;
+                    type_string.push('e');
+                }
+            }
+            _ => {}
         }
     }
 

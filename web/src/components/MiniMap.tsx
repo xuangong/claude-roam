@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
+import { useState, useRef, useEffect, useCallback, useMemo, useLayoutEffect } from 'react'
 
 export interface MiniMapItem {
   type: string
@@ -26,6 +26,7 @@ const FILTER_TYPES = [
   { type: 'tool_call', color: '#d1d5db', label: 'Tool Call' },
   { type: 'tool_result', color: '#e5e7eb', label: 'Tool Result' },
   { type: 'system', color: '#f3f4f6', label: 'System' },
+  { type: 'error', color: '#ef4444', label: 'Error' },
 ]
 
 export function MiniMap({
@@ -42,13 +43,14 @@ export function MiniMap({
 }: MiniMapProps) {
   const minimapRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
+  const viewportRef = useRef<HTMLDivElement>(null)
+  const rulerViewportRef = useRef<HTMLDivElement>(null)
   const isDragging = useRef(false)
   const isResizing = useRef(false)
   const isResizingTop = useRef(false)
   const isMoving = useRef(false)
   const dragOffset = useRef({ x: 0, y: 0 })
   const resizeTopStart = useRef({ y: 0, top: 0, height: 0 })
-  const [, forceUpdate] = useState(0)
   const [hoverRatio, setHoverRatio] = useState<number | null>(null)
   const [isDraggingState, setIsDraggingState] = useState(false)
 
@@ -119,39 +121,6 @@ export function MiniMap({
     return { width: window.innerWidth, height: window.innerHeight, left: 0, top: 0 }
   }, [])
 
-  const handleMouseMove = useCallback((e: React.MouseEvent) => {
-    if (isResizing.current) {
-      if (!minimapRef.current) return
-      const rect = minimapRef.current.getBoundingClientRect()
-      const newHeight = Math.max(100, Math.min(window.innerHeight - 50, e.clientY - rect.top))
-      setHeight(newHeight)
-      return
-    }
-    if (isResizingTop.current) {
-      const delta = e.clientY - resizeTopStart.current.y
-      const bottom = resizeTopStart.current.top + resizeTopStart.current.height
-      const clampedTop = Math.max(0, resizeTopStart.current.top + delta)
-      const newHeight = Math.max(100, bottom - clampedTop)
-      setHeight(newHeight)
-      setPosition((prev: { top: number; right: number }) => ({ ...prev, top: clampedTop }))
-      return
-    }
-    if (isMoving.current) {
-      const container = getContainerBounds()
-      const h = minimapRef.current?.offsetHeight || height
-      const newTop = e.clientY - container.top - dragOffset.current.y
-      const newRight = container.width - (e.clientX - container.left) - (60 - dragOffset.current.x)
-      setPosition({
-        top: Math.max(0, Math.min(container.height - h, newTop)),
-        right: Math.max(0, Math.min(container.width - 100, newRight))
-      })
-      return
-    }
-    if (isDragging.current) {
-      handleNavigateClick(e)
-    }
-  }, [handleNavigateClick, getContainerBounds, height])
-
   useEffect(() => {
     const handleGlobalMouseUp = () => {
       isDragging.current = false
@@ -202,10 +171,6 @@ export function MiniMap({
     }
   }, [onNavigate, getContainerBounds])
 
-  useEffect(() => {
-    forceUpdate(n => n + 1)
-  }, [height])
-
   const [contentRect, setContentRect] = useState({ top: 56, height: height - 76 })
 
   useEffect(() => {
@@ -224,8 +189,89 @@ export function MiniMap({
     }
   }, [height, items])
 
-  const viewportTop = contentRect.top + visibleStart * contentRect.height
-  const viewportHeight = (visibleEnd - visibleStart) * contentRect.height
+  // Adjust height ratios so every item gets at least 1px from flex allocation
+  // Strategy: small items get fixed 1px, large items share remaining space proportionally
+  // Set flex-grow = desired pixel height (sum = containerHeight), so flex gives exact sizes
+  const adjustedItems = useMemo(() => {
+    if (contentRect.height <= 0 || items.length === 0) return items
+
+    const H = contentRect.height
+    const totalRatio = items.reduce((sum, item) => sum + item.heightRatio, 0)
+    if (totalRatio === 0) return items
+
+    // Raw pixel heights from proportional distribution
+    const rawHeights = items.map(item => item.heightRatio / totalRatio * H)
+    const needsAdjust = rawHeights.some(h => h < 1)
+    if (!needsAdjust) return items
+
+    // Count small items and sum large item ratios
+    let smallCount = 0
+    let largeRatioSum = 0
+    for (let i = 0; i < items.length; i++) {
+      if (rawHeights[i] < 1) {
+        smallCount++
+      } else {
+        largeRatioSum += items[i].heightRatio
+      }
+    }
+
+    const remainingH = H - smallCount
+    if (remainingH <= 0 || largeRatioSum === 0) return items
+
+    // flex-grow values = desired pixel heights, sum to H → exact pixel allocation
+    return items.map((item, i) => ({
+      ...item,
+      heightRatio: rawHeights[i] < 1 ? 1 : (item.heightRatio / largeRatioSum * remainingH)
+    }))
+  }, [items, contentRect.height])
+
+  // DOM-measured viewport positioning
+  // Reads actual flex child positions so minHeight doesn't cause drift
+  useLayoutEffect(() => {
+    if (!contentRef.current || !viewportRef.current || items.length === 0 || !totalMessages) return
+
+    const children = contentRef.current.children
+    if (children.length === 0) return
+
+    const startMsgIdx = visibleStart * totalMessages
+    const endMsgIdx = visibleEnd * totalMessages
+
+    let cumMsg = 0
+    let pxTop = 0
+    const lastChild = children[children.length - 1] as HTMLElement
+    let pxBot = lastChild.offsetTop + lastChild.offsetHeight
+    let foundStart = false
+
+    for (let i = 0; i < items.length && i < children.length; i++) {
+      const msgCount = Math.round(items[i].heightRatio * totalMessages)
+      const child = children[i] as HTMLElement
+
+      if (!foundStart && cumMsg + msgCount > startMsgIdx) {
+        const f = msgCount > 0 ? (startMsgIdx - cumMsg) / msgCount : 0
+        pxTop = child.offsetTop + f * child.offsetHeight
+        foundStart = true
+      }
+
+      if (foundStart && cumMsg + msgCount >= endMsgIdx) {
+        const f = msgCount > 0 ? (endMsgIdx - cumMsg) / msgCount : 1
+        pxBot = child.offsetTop + f * child.offsetHeight
+        break
+      }
+
+      cumMsg += msgCount
+    }
+
+    const top = contentRect.top + pxTop
+    const h = Math.max(pxBot - pxTop, 4)
+
+    viewportRef.current.style.top = `${top}px`
+    viewportRef.current.style.height = `${h}px`
+
+    if (rulerViewportRef.current) {
+      rulerViewportRef.current.style.top = `${pxTop}px`
+      rulerViewportRef.current.style.height = `${h}px`
+    }
+  }, [items, visibleStart, visibleEnd, totalMessages, contentRect])
 
   // Calculate positions of tree separators for the ruler
   // Always calculate from items to ensure alignment with minimap content
@@ -291,14 +337,6 @@ export function MiniMap({
     return visible
   }, [separatorPositions, contentRect.height])
 
-  const handleRulerClick = useCallback((ratio: number) => {
-    onNavigate(ratio)
-  }, [onNavigate])
-
-  // Calculate viewport position relative to ruler
-  const rulerViewportTop = visibleStart * contentRect.height
-  const rulerViewportHeight = (visibleEnd - visibleStart) * contentRect.height
-
   // Current message index based on ratio (for position indicator)
   const currentMessageIndex = hoverRatio !== null
     ? Math.floor(hoverRatio * totalMessages) + 1
@@ -321,7 +359,6 @@ export function MiniMap({
       ref={minimapRef}
       style={{ top: `${position.top}px`, right: `${position.right}px`, height: `${height}px`, maxHeight: 'none' }}
       onMouseDown={handleMouseDown}
-      onMouseMove={handleMouseMove}
       onWheel={handleWheel}
     >
       <div className="minimap-resize-top-handle" title="Drag to resize">═</div>
@@ -358,14 +395,14 @@ export function MiniMap({
         {/* Viewport indicator on ruler */}
         <div
           className="minimap-ruler-viewport"
-          style={{ top: `${rulerViewportTop}px`, height: `${Math.max(rulerViewportHeight, 4)}px` }}
+          ref={rulerViewportRef}
         />
         {visibleSeparatorPositions.map((pos, i) => (
           <div
             key={i}
             className="minimap-ruler-tick"
             style={{ top: `${pos.ratio * contentRect.height}px` }}
-            onClick={(e) => { e.stopPropagation(); handleRulerClick(pos.ratio) }}
+            onClick={(e) => { e.stopPropagation(); onNavigate(pos.ratio) }}
             title={`Conversation ${pos.index}`}
           >
             <span className="minimap-ruler-label">{pos.index}</span>
@@ -373,13 +410,19 @@ export function MiniMap({
         ))}
       </div>
       <div className="minimap-content" ref={contentRef}>
-        {items.map((item, i) => {
+        {adjustedItems.map((item, i) => {
           const filtered = activeFilters && !activeFilters.has(item.type) && item.type !== 'tree-separator'
+          const msgCount = Math.round(items[i].heightRatio * totalMessages)
+          const label = FILTER_TYPES.find(f => f.type === item.type)?.label || item.type
+          const tooltip = item.type === 'tree-separator'
+            ? `Conversation ${item.treeIndex}`
+            : `${label} × ${msgCount}`
           return (
             <div
               key={i}
               className={`minimap-item minimap-${item.type}`}
               style={{ flex: `${item.heightRatio} 0 0`, opacity: filtered ? 0.08 : 1 }}
+              data-tooltip={tooltip}
             />
           )
         })}
@@ -409,7 +452,7 @@ export function MiniMap({
           })}
         </div>
       )}
-      <div className="minimap-viewport" style={{ top: `${viewportTop}px`, height: `${viewportHeight}px` }} />
+      <div className="minimap-viewport" ref={viewportRef} />
       <div className="minimap-resize-handle" title="Drag to resize">═</div>
     </div>
   )

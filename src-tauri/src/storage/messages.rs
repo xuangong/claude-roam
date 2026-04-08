@@ -7,8 +7,22 @@ use crate::parser::{DisplayMessage, DisplayType};
 
 const CHUNK_SIZE: usize = 100;
 
-/// Store messages for a session in chunks
+/// Store messages for a session in chunks (using transaction for performance)
 pub fn store_messages(conn: &Connection, session_id: &str, messages: &[DisplayMessage]) -> Result<()> {
+    conn.execute_batch("BEGIN")?;
+
+    let result = store_messages_inner(conn, session_id, messages);
+
+    if result.is_ok() {
+        conn.execute_batch("COMMIT")?;
+    } else {
+        conn.execute_batch("ROLLBACK").ok();
+    }
+
+    result
+}
+
+fn store_messages_inner(conn: &Connection, session_id: &str, messages: &[DisplayMessage]) -> Result<()> {
     // Clear existing data
     conn.execute(
         "DELETE FROM message_chunks WHERE session_id = ?1",

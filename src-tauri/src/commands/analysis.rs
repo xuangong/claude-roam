@@ -1,10 +1,11 @@
 //! Analysis commands
 
 use std::collections::HashMap;
+use std::io::{BufRead, BufReader};
 use tauri::State;
 
 use crate::parser::{
-    DisplayMessage, DisplayType, SessionAnalysis, TimeSpan, ToolCallStat, ToolUsageStat,
+    DisplayMessage, DisplayType, SessionAnalysis, TimeSpan, ToolCallStat, ToolUsageStat, TokenUsage,
 };
 use crate::state::AppDb;
 use crate::storage::{messages as message_storage, sessions as session_storage};
@@ -61,6 +62,9 @@ pub async fn analyze_session(
     // Calculate time span
     let time_span = calculate_time_span(&messages);
 
+    // Calculate token usage from JSONL file
+    let token_usage = calculate_token_usage(&session.id, &session.encoded_dir);
+
     Ok(SessionAnalysis {
         total_messages,
         human_messages,
@@ -69,6 +73,7 @@ pub async fn analyze_session(
         tree_count: session.tree_count,
         time_span,
         top_tools_by_usage: top_tools,
+        token_usage,
     })
 }
 
@@ -160,4 +165,66 @@ fn calculate_time_span(messages: &[DisplayMessage]) -> Option<TimeSpan> {
         end,
         duration_minutes,
     })
+}
+
+/// Calculate token usage by reading the JSONL file directly
+fn calculate_token_usage(session_id: &str, encoded_dir: &str) -> Option<TokenUsage> {
+    let home = dirs::home_dir()?;
+    let path = home
+        .join(".claude")
+        .join("projects")
+        .join(encoded_dir)
+        .join(format!("{}.jsonl", session_id));
+
+    let file = std::fs::File::open(&path).ok()?;
+    let reader = BufReader::new(file);
+
+    let mut input_tokens: u64 = 0;
+    let mut output_tokens: u64 = 0;
+    let mut cache_read_tokens: u64 = 0;
+    let mut cache_creation_tokens: u64 = 0;
+    let mut found_any = false;
+
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+
+        if !line.contains("\"usage\"") {
+            continue;
+        }
+
+        let value: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        if let Some(usage) = value.get("message").and_then(|m| m.get("usage")) {
+            if let Some(v) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
+                input_tokens += v;
+                found_any = true;
+            }
+            if let Some(v) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
+                output_tokens += v;
+            }
+            if let Some(v) = usage.get("cache_read_input_tokens").and_then(|v| v.as_u64()) {
+                cache_read_tokens += v;
+            }
+            if let Some(v) = usage.get("cache_creation_input_tokens").and_then(|v| v.as_u64()) {
+                cache_creation_tokens += v;
+            }
+        }
+    }
+
+    if found_any {
+        Some(TokenUsage {
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_creation_tokens,
+        })
+    } else {
+        None
+    }
 }

@@ -59,6 +59,7 @@ pub enum DisplayType {
     ToolResult,
     Thinking,
     CodeResult,
+    Error,
 }
 
 impl std::fmt::Display for DisplayType {
@@ -70,6 +71,7 @@ impl std::fmt::Display for DisplayType {
             DisplayType::ToolResult => write!(f, "R"),
             DisplayType::Thinking => write!(f, "K"),
             DisplayType::CodeResult => write!(f, "C"),
+            DisplayType::Error => write!(f, "E"),
         }
     }
 }
@@ -195,6 +197,8 @@ pub struct SessionAnalysis {
     pub time_span: Option<TimeSpan>,
     #[serde(rename = "topToolsByUsage")]
     pub top_tools_by_usage: Vec<ToolUsageStat>,
+    #[serde(rename = "tokenUsage")]
+    pub token_usage: Option<TokenUsage>,
 }
 
 /// Tool call statistics
@@ -224,4 +228,17 @@ pub struct TimeSpan {
     pub end: String,
     #[serde(rename = "durationMinutes")]
     pub duration_minutes: i64,
+}
+
+/// Aggregated token usage for a session
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenUsage {
+    #[serde(rename = "inputTokens")]
+    pub input_tokens: u64,
+    #[serde(rename = "outputTokens")]
+    pub output_tokens: u64,
+    #[serde(rename = "cacheReadTokens")]
+    pub cache_read_tokens: u64,
+    #[serde(rename = "cacheCreationTokens")]
+    pub cache_creation_tokens: u64,
 }

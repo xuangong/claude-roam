@@ -17,7 +17,9 @@ import {
   isTauri,
   getSession,
   getMessagesRange,
+  analyzeSession,
   type SessionMeta as TauriSessionMeta,
+  type TokenUsage,
 } from '../utils/tauriStore'
 
 // Props interface for Tauri mode
@@ -28,17 +30,23 @@ interface SessionDetailProps {
 }
 
 // Estimate message height based on type char (from typeString)
-// Overestimate rather than underestimate to prevent content truncation
 function estimateHeightByType(typeChar: string): number {
   switch (typeChar) {
     case 'h': return 150   // human
     case 'a': return 300   // assistant
     case 'c': return 80    // tool_call
     case 'r': return 200   // tool_result
-    case 's': return 40    // tree-separator
-    case 'y': return 60    // system
+    case 'y': return 60    // system/thinking
+    case 'e': return 80    // error
     default: return 120
   }
+}
+
+// Format large token counts: 104316421 → "104.3M", 172001 → "172K", 8 → "8"
+function formatTokenCount(n: number): string {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M'
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K'
+  return String(n)
 }
 
 function SessionDetail({ sessionId: propSessionId, useTauri: propUseTauri, onExport }: SessionDetailProps = {}) {
@@ -59,8 +67,9 @@ function SessionDetail({ sessionId: propSessionId, useTauri: propUseTauri, onExp
   const [visibleMessages, setVisibleMessages] = useState<Map<number, DisplayMessage>>(new Map())
   const cacheRef = useRef<MessageCache | null>(null)
   const [refreshKey, setRefreshKey] = useState(0)  // For forcing re-parse
+  const [tokenUsage, setTokenUsage] = useState<TokenUsage | null>(null)
 
-  // Virtual scroll state
+  // Scroll container ref
   const parentRef = useRef<HTMLDivElement>(null)
   const [visibleStart, setVisibleStart] = useState(0)
   const [visibleEnd, setVisibleEnd] = useState(1)
@@ -79,7 +88,7 @@ function SessionDetail({ sessionId: propSessionId, useTauri: propUseTauri, onExp
     if (saved) {
       try { return new Set(JSON.parse(saved)) } catch { /* ignore */ }
     }
-    return new Set(['human', 'assistant', 'tool_call', 'tool_result', 'system'])
+    return new Set(['human', 'assistant', 'tool_call', 'tool_result', 'system', 'error'])
   })
 
   const toggleMinimapFilter = useCallback((type: string) => {
@@ -107,64 +116,61 @@ function SessionDetail({ sessionId: propSessionId, useTauri: propUseTauri, onExp
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [])
 
-  // Virtual list setup - estimateSize must be stable (no dependency on visibleMessages)
-  // to avoid feedback loops: load messages → height change → scroll shift → reload
+  // ============ Virtual scrolling (browser mode only) ============
   const virtualizer = useVirtualizer({
-    count: loading ? 0 : totalMessages,
+    count: (!useTauriMode && !loading) ? totalMessages : 0,
     getScrollElement: () => parentRef.current,
     estimateSize: (index) => estimateHeightByType(typeString?.[index] || 'a'),
     overscan: 20,
   })
 
-  // Update visible range for minimap (browser mode: from virtualizer)
+  // ============ Viewport tracking for minimap ============
+  // Both modes: find visible message indices, map to index/totalMessages ratio
   useEffect(() => {
-    if (useTauriMode) return  // Tauri mode uses scroll events instead
-    const range = virtualizer.range
-    if (range && totalMessages > 0) {
-      setVisibleStart(range.startIndex / totalMessages)
-      setVisibleEnd(Math.min(1, (range.endIndex + 1) / totalMessages))
-    }
-  }, [virtualizer.range, totalMessages, useTauriMode])
+    if (loading || totalMessages === 0) return
 
-  // Update visible range for minimap (Tauri mode: find visible message indices)
-  useEffect(() => {
-    if (!useTauriMode) return
-    const el = parentRef.current
-    if (!el) return
+    if (useTauriMode) {
+      const el = parentRef.current
+      if (!el) return
 
-    const handleScroll = () => {
-      if (totalMessages <= 0) return
-      const rect = el.getBoundingClientRect()
-
-      // Find message elements at top and bottom of viewport
-      const getIndexAt = (y: number): number => {
-        let element = document.elementFromPoint(rect.left + rect.width / 3, y) as Element | null
-        while (element && element !== el) {
-          const idx = element.getAttribute?.('data-index')
-          if (idx !== null && idx !== undefined) return parseInt(idx)
-          element = element.parentElement
+      const handleScroll = () => {
+        const rect = el.getBoundingClientRect()
+        const getIndexAt = (y: number): number => {
+          let element = document.elementFromPoint(rect.left + rect.width / 3, y) as Element | null
+          while (element && element !== el) {
+            const idx = element.getAttribute?.('data-index')
+            if (idx !== null && idx !== undefined) return parseInt(idx)
+            element = element.parentElement
+          }
+          return -1
         }
-        return -1
+
+        const firstIdx = getIndexAt(rect.top + 5)
+        const lastIdx = getIndexAt(rect.bottom - 5)
+
+        if (firstIdx >= 0) {
+          setVisibleStart(firstIdx / totalMessages)
+          setVisibleEnd(Math.min(1, ((lastIdx >= 0 ? lastIdx : firstIdx) + 1) / totalMessages))
+        }
       }
 
-      const firstIdx = getIndexAt(rect.top + 5)
-      const lastIdx = getIndexAt(rect.bottom - 5)
-
-      if (firstIdx >= 0 && totalMessages > 0) {
-        setVisibleStart(firstIdx / totalMessages)
-        setVisibleEnd(Math.min(1, ((lastIdx >= 0 ? lastIdx : firstIdx) + 1) / totalMessages))
+      handleScroll()
+      el.addEventListener('scroll', handleScroll, { passive: true })
+      return () => el.removeEventListener('scroll', handleScroll)
+    } else {
+      const range = virtualizer.range
+      if (range && totalMessages > 0) {
+        setVisibleStart(range.startIndex / totalMessages)
+        setVisibleEnd(Math.min(1, (range.endIndex + 1) / totalMessages))
       }
     }
-
-    handleScroll()  // Initial
-    el.addEventListener('scroll', handleScroll, { passive: true })
-    return () => el.removeEventListener('scroll', handleScroll)
-  }, [useTauriMode, totalMessages, loading])
+  }, [useTauriMode, loading, totalMessages, virtualizer.range])
 
   // Track last loaded range to avoid unnecessary updates
   const lastLoadedRangeRef = useRef<{ start: number; end: number } | null>(null)
 
   // Build minimap items - merge adjacent same-type messages
+  // Use uniform heights (1 per message) to match viewport coordinate system (index/totalMessages)
   const minimapItems = useMemo<MiniMapItem[]>(() => {
     if (totalMessages === 0 || !typeString) return []
 
@@ -174,7 +180,8 @@ function SessionDetail({ sessionId: propSessionId, useTauri: propUseTauri, onExp
       'c': 'tool_call',
       'r': 'tool_result',
       's': 'tree-separator',
-      'y': 'system'
+      'y': 'system',
+      'e': 'error'
     }
 
     const items: MiniMapItem[] = []
@@ -184,7 +191,7 @@ function SessionDetail({ sessionId: propSessionId, useTauri: propUseTauri, onExp
     let currentCount = 0
 
     const pushCurrentBlock = () => {
-      if (currentType && currentCount > 0) {
+      if (currentType !== null && currentCount > 0) {
         items.push({
           type: currentType,
           index: currentStart,
@@ -269,54 +276,43 @@ function SessionDetail({ sessionId: propSessionId, useTauri: propUseTauri, onExp
     setSearchResults(results)
     if (results.length > 0) {
       setCurrentSearchIndex(0)
-      if (useTauriMode) {
-        // Tauri: scroll to element by data-index
-        const el = parentRef.current?.querySelector(`[data-index="${results[0]}"]`) as HTMLElement | null
-        el?.scrollIntoView({ block: 'center' })
-      } else {
-        virtualizer.scrollToIndex(results[0], { align: 'center' })
-      }
+      scrollToMessage(results[0])
     } else {
       setCurrentSearchIndex(-1)
     }
-  }, [searchQuery, totalMessages, virtualizer, useTauriMode, visibleMessages])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchQuery, totalMessages, useTauriMode, visibleMessages])
 
   // Ref to track ongoing search scroll target
   const searchScrollTargetRef = useRef<number | null>(null)
 
-  // Scroll to search result with retry logic for virtual scrolling
+  // Scroll to search result
   const scrollToSearchResult = useCallback((messageIndex: number) => {
     if (useTauriMode) {
-      // Tauri: scroll to element by data-index
+      // Tauri: native DOM scroll
       const el = parentRef.current?.querySelector(`[data-index="${messageIndex}"]`) as HTMLElement | null
-      el?.scrollIntoView({ block: 'center', behavior: 'smooth' })
-      return
-    }
-
-    searchScrollTargetRef.current = messageIndex
-
-    const scrollToTarget = () => {
-      if (searchScrollTargetRef.current !== messageIndex) return
-      if (!parentRef.current) return
-
-      virtualizer.scrollToIndex(messageIndex, { align: 'center' })
-
-      const range = virtualizer.range
-      if (range) {
-        const isInView = messageIndex >= range.startIndex && messageIndex <= range.endIndex
-        if (!isInView) {
-          requestAnimationFrame(scrollToTarget)
+      el?.scrollIntoView({ block: 'center' })
+    } else {
+      // Browser: virtualizer with retry
+      searchScrollTargetRef.current = messageIndex
+      const scrollToTarget = () => {
+        if (searchScrollTargetRef.current !== messageIndex) return
+        if (!parentRef.current) return
+        virtualizer.scrollToIndex(messageIndex, { align: 'center' })
+        const range = virtualizer.range
+        if (range) {
+          const isInView = messageIndex >= range.startIndex && messageIndex <= range.endIndex
+          if (!isInView) {
+            requestAnimationFrame(scrollToTarget)
+          }
         }
       }
+      scrollToTarget()
+      if (cacheRef.current) {
+        cacheRef.current.prefetch(messageIndex, totalMessages)
+      }
     }
-
-    scrollToTarget()
-
-    // Prefetch messages around target
-    if (cacheRef.current) {
-      cacheRef.current.prefetch(messageIndex, totalMessages)
-    }
-  }, [virtualizer, totalMessages, useTauriMode])
+  }, [useTauriMode, virtualizer, totalMessages])
 
   // Navigate search results
   const goToNextResult = useCallback(() => {
@@ -346,41 +342,21 @@ function SessionDetail({ sessionId: propSessionId, useTauri: propUseTauri, onExp
     scrollToSearchResult(searchResults[searchIndex])
   }, [searchResults, scrollToSearchResult])
 
-  // Ref to track ongoing scroll target
-  const scrollTargetRef = useRef<number | null>(null)
-
   // Navigate via minimap
   const handleMinimapNavigate = useCallback((ratio: number) => {
     if (!parentRef.current || totalMessages === 0) return
 
+    // Uniform coordinate system: ratio maps directly to message index
+    const targetIndex = Math.min(Math.floor(ratio * totalMessages), totalMessages - 1)
+
     if (useTauriMode) {
-      // Tauri mode: ratio is message index ratio, scroll to that message
-      const targetIndex = Math.floor(ratio * totalMessages)
       const el = parentRef.current.querySelector(`[data-index="${targetIndex}"]`) as HTMLElement | null
       if (el) el.scrollIntoView({ block: 'start' })
-      return
-    }
-
-    const targetIndex = Math.floor(ratio * totalMessages)
-    scrollTargetRef.current = ratio
-
-    const scrollToTarget = () => {
-      if (scrollTargetRef.current !== ratio) return
-      if (!parentRef.current) return
-
+    } else {
       virtualizer.scrollToIndex(targetIndex, { align: 'start' })
-
-      const range = virtualizer.range
-      if (range && Math.abs(range.startIndex - targetIndex) > 2) {
-        requestAnimationFrame(scrollToTarget)
+      if (cacheRef.current) {
+        cacheRef.current.prefetch(targetIndex, totalMessages)
       }
-    }
-
-    scrollToTarget()
-
-    // Prefetch messages around target
-    if (cacheRef.current) {
-      cacheRef.current.prefetch(targetIndex, totalMessages)
     }
   }, [totalMessages, virtualizer, useTauriMode])
 
@@ -395,8 +371,9 @@ function SessionDetail({ sessionId: propSessionId, useTauri: propUseTauri, onExp
   // Scroll to a specific message by index (for type navigation)
   const scrollToMessage = useCallback((index: number) => {
     if (useTauriMode) {
+      // Tauri: native DOM scroll
       const el = parentRef.current?.querySelector(`[data-index="${index}"]`) as HTMLElement | null
-      el?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+      el?.scrollIntoView({ block: 'center' })
     } else {
       virtualizer.scrollToIndex(index, { align: 'center' })
     }
@@ -428,7 +405,7 @@ function SessionDetail({ sessionId: propSessionId, useTauri: propUseTauri, onExp
         setTotalMessages(session.messageCount)
         setTypeString(session.typeString || '')
 
-        // Load ALL messages at once - no virtual scrolling needed for local data
+        // Load ALL messages at once
         const allMessages = await getMessagesRange(id!, 0, session.messageCount)
         const allVisible = new Map<number, DisplayMessage>()
         allMessages.forEach((msg, i) => allVisible.set(i, msg))
@@ -549,6 +526,14 @@ function SessionDetail({ sessionId: propSessionId, useTauri: propUseTauri, onExp
     }
   }, [id, refreshKey, useTauriMode])
 
+  // Fetch token usage in Tauri mode
+  useEffect(() => {
+    if (!id || !useTauriMode || loading) return
+    analyzeSession(id).then(analysis => {
+      setTokenUsage(analysis.tokenUsage)
+    }).catch(() => {/* ignore */})
+  }, [id, useTauriMode, loading])
+
   // Browser mode only: load visible messages on scroll
   useEffect(() => {
     if (useTauriMode || loading || totalMessages === 0 || isParsingData || !cacheRef.current) return
@@ -624,9 +609,6 @@ function SessionDetail({ sessionId: propSessionId, useTauri: propUseTauri, onExp
     return null
   }
 
-  const virtualItems = virtualizer.getVirtualItems()
-  const totalSize = virtualizer.getTotalSize()
-
   // Get session info from appropriate source
   const sessionId = useTauriMode ? tauriSession!.id : detail!.session.session_id
   const sessionCreatedAt = useTauriMode
@@ -635,6 +617,15 @@ function SessionDetail({ sessionId: propSessionId, useTauri: propUseTauri, onExp
   const sessionUpdatedAt = useTauriMode
     ? (tauriSession!.updatedAt || new Date(tauriSession!.lastModified).toISOString())
     : detail!.session.updated_at
+
+  // Tauri mode: build message array for direct rendering
+  const tauriMessages = useTauriMode
+    ? Array.from({ length: totalMessages }, (_, i) => visibleMessages.get(i) || null)
+    : null
+
+  // Browser mode: virtualizer data
+  const virtualItems = useTauriMode ? [] : virtualizer.getVirtualItems()
+  const totalSize = useTauriMode ? 0 : virtualizer.getTotalSize()
 
   return (
     <div className="detail-page">
@@ -645,52 +636,36 @@ function SessionDetail({ sessionId: propSessionId, useTauri: propUseTauri, onExp
         <div className="detail-meta">
           {!useTauriMode && <span>{detail!.session.total_lines} lines</span>}
           <span>{totalMessages} messages</span>
-          <span>Created: {formatDateTime(sessionCreatedAt)}</span>
-          <span>Updated: {formatDateTime(sessionUpdatedAt)}</span>
+          <span className="meta-timestamp">Created: {formatDateTime(sessionCreatedAt)}</span>
+          <span className="meta-timestamp">Updated: {formatDateTime(sessionUpdatedAt)}</span>
+          {tokenUsage && (
+            <span className="token-usage-stats" title={`Input: ${tokenUsage.inputTokens.toLocaleString()}\nOutput: ${tokenUsage.outputTokens.toLocaleString()}\nCache Read: ${tokenUsage.cacheReadTokens.toLocaleString()}\nCache Create: ${tokenUsage.cacheCreationTokens.toLocaleString()}`}>
+              <span className="token-label">Tokens:</span>
+              <span className="token-in">↓{formatTokenCount(tokenUsage.inputTokens)}</span>
+              <span className="token-out">↑{formatTokenCount(tokenUsage.outputTokens)}</span>
+              {tokenUsage.cacheReadTokens > 0 && <span className="token-cache">⚡{formatTokenCount(tokenUsage.cacheReadTokens)}</span>}
+            </span>
+          )}
           <button
+            className="detail-action-btn"
             onClick={() => setShowSearch(true)}
-            style={{
-              padding: 'var(--space-1) var(--space-2)',
-              fontSize: '12px',
-              cursor: 'pointer',
-              background: 'var(--bg-tertiary)',
-              border: '1px solid var(--border-default)',
-              borderRadius: 'var(--radius-sm)',
-              color: 'var(--text-secondary)',
-            }}
             title="Search (Ctrl+F)"
           >
             🔍 Search
           </button>
           <button
+            className="detail-action-btn"
             onClick={handleRefreshCache}
-            style={{
-              padding: 'var(--space-1) var(--space-2)',
-              fontSize: '12px',
-              cursor: 'pointer',
-              background: 'var(--bg-tertiary)',
-              border: '1px solid var(--border-default)',
-              borderRadius: 'var(--radius-sm)',
-              color: 'var(--text-secondary)',
-            }}
             title="Clear cache and re-parse messages"
           >
             ↻ Refresh
           </button>
           <button
+            className="detail-action-btn"
             onClick={() => {
               const next = !showMinimap
               setShowMinimap(next)
               localStorage.setItem('minimap-visible', String(next))
-            }}
-            style={{
-              padding: 'var(--space-1) var(--space-2)',
-              fontSize: '12px',
-              cursor: 'pointer',
-              background: showMinimap ? 'var(--bg-tertiary)' : 'var(--bg-hover)',
-              border: '1px solid var(--border-default)',
-              borderRadius: 'var(--radius-sm)',
-              color: 'var(--text-secondary)',
             }}
             title={showMinimap ? 'Hide minimap' : 'Show minimap'}
           >
@@ -698,16 +673,8 @@ function SessionDetail({ sessionId: propSessionId, useTauri: propUseTauri, onExp
           </button>
           {onExport && (
             <button
+              className="detail-action-btn"
               onClick={onExport}
-              style={{
-                padding: 'var(--space-1) var(--space-2)',
-                fontSize: '12px',
-                cursor: 'pointer',
-                background: 'var(--bg-tertiary)',
-                border: '1px solid var(--border-default)',
-                borderRadius: 'var(--radius-sm)',
-                color: 'var(--text-secondary)',
-              }}
               title="Export this session to .roam file"
             >
               ⬇ Export
@@ -769,24 +736,19 @@ function SessionDetail({ sessionId: propSessionId, useTauri: propUseTauri, onExp
                 No conversation data to display
               </div>
             ) : useTauriMode ? (
-              /* Tauri mode: render all messages directly, no virtual scrolling */
-              <div style={{ width: '100%' }}>
-                {Array.from({ length: totalMessages }, (_, i) => {
-                  const msg = visibleMessages.get(i) || null
-                  return (
-                    <div key={i} data-index={i}>
-                      <MessageRow
-                        msg={msg}
-                        searchQuery={searchQuery}
-                        isSearchMatch={searchResults.includes(i)}
-                        messageIndex={i}
-                        typeString={typeString}
-                        onScrollToMessage={scrollToMessage}
-                      />
-                    </div>
-                  )
-                })}
-              </div>
+              /* Tauri mode: full DOM rendering, measured heights for minimap */
+              tauriMessages!.map((msg, i) => (
+                <div key={i} data-index={i}>
+                  <MessageRow
+                    msg={msg}
+                    searchQuery={searchQuery}
+                    isSearchMatch={searchResults.includes(i)}
+                    messageIndex={i}
+                    typeString={typeString}
+                    onScrollToMessage={scrollToMessage}
+                  />
+                </div>
+              ))
             ) : (
               /* Browser mode: virtual scrolling */
               <div

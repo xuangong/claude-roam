@@ -57,7 +57,11 @@ Claude Roam includes a native **Tauri 2 desktop app** built to handle **extremel
 - **Native Desktop App**: Lightweight (~6MB) Tauri 2 app with Rust backend and SQLite
 - **Virtual Scrolling**: Only visible messages are rendered, enabling smooth navigation
 - **MiniMap with Filters**: Visual overview with clickable color filters by message type
+- **MiniMap Tooltips**: Hover over color bars for message type and count details
 - **Type Navigation**: Jump between same-type messages (human/assistant/tool) with prev/next arrows
+- **Token Usage Stats**: Per-session token consumption (input, output, cache read/creation)
+- **Session List Filter & Sort**: Filter sessions by keyword, sort by time, size, or message count
+- **Responsive Layout**: Header gracefully adapts to narrow widths, prioritizing actions over timestamps
 - **Raw JSON Mode**: Inspect original unparsed message structure for debugging
 - **Import/Export**: Load and save `.roam` files directly from the app
 - **Search & Navigate**: Find any message in massive histories with instant search
@@ -80,8 +84,11 @@ Your conversations with Claude are valuable knowledge assets:
 - **Native Desktop App**: Tauri 2 desktop viewer (~6MB) with Rust backend
 - **Large File Support**: Handle sessions with 10,000+ messages smoothly
 - **Virtual Scrolling**: Full-screen conversation view with smooth navigation
-- **MiniMap with Filters**: Visual overview with message type color filters
+- **MiniMap with Filters**: Visual overview with message type color filters and hover tooltips
 - **Type Navigation**: Jump between same-type messages with prev/next arrows
+- **Token Usage Stats**: Per-session token consumption breakdown (input, output, cache)
+- **Session List Filter & Sort**: Filter by keyword, sort by time/size/message count
+- **Responsive Layout**: Adaptive header that prioritizes actions over timestamps
 - **Raw JSON Mode**: Inspect original message structure for debugging
 - **Export/Import**: Portable `.roam` files, import/export from desktop app
 - **Line-Level Tracking**: Know which machine contributed each part
@@ -288,7 +295,11 @@ Claude Roam 包含原生 **Tauri 2 桌面应用**，专为处理**超大会话**
 - **原生桌面应用**：轻量级（~6MB）Tauri 2 应用，Rust 后端 + SQLite
 - **虚拟滚动**：只渲染可见消息，实现丝滑导航
 - **MiniMap 筛选**：可视化概览，支持按消息类型颜色筛选
+- **MiniMap 悬停提示**：鼠标悬停色块显示消息类型和数量
 - **类型导航**：通过上下箭头在同类型消息间快速跳转
+- **Token 用量统计**：每会话 Token 消耗分析（输入/输出/缓存读取/缓存创建）
+- **会话列表筛选排序**：按关键词筛选，按时间/大小/消息数排序
+- **响应式布局**：表头自适应窄宽度，优先显示操作按钮
 - **Raw JSON 模式**：查看原始未解析的消息结构，方便调试
 - **导入/导出**：直接从桌面应用加载和保存 `.roam` 文件
 - **搜索与定位**：在海量历史中即时搜索任意消息
@@ -311,8 +322,11 @@ Claude Roam 包含原生 **Tauri 2 桌面应用**，专为处理**超大会话**
 - **原生桌面应用**：Tauri 2 桌面查看器（~6MB），Rust 后端
 - **大文件支持**：流畅处理 10,000+ 条消息的会话
 - **虚拟滚动**：全屏对话视图，丝滑导航
-- **MiniMap 筛选**：可视化概览，支持消息类型颜色筛选
+- **MiniMap 筛选**：可视化概览，支持消息类型颜色筛选和悬停提示
 - **类型导航**：通过箭头在同类型消息间快速跳转
+- **Token 用量统计**：每会话 Token 消耗分析（输入/输出/缓存）
+- **会话列表筛选排序**：按关键词筛选，按时间/大小/消息数排序
+- **响应式布局**：自适应表头，优先显示操作按钮
 - **Raw JSON 模式**：查看原始消息结构，方便调试
 - **导出/导入**：便携式 `.roam` 文件，支持桌面应用内导入导出
 - **行级来源追踪**：知道哪部分来自哪台机器

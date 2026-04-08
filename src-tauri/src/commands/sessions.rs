@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 use walkdir::WalkDir;
 
-use crate::parser::{get_file_stats, parse_jsonl_file, ScanResult, SessionMeta};
+use crate::parser::{parse_jsonl_file_with_stats, ScanResult, SessionMeta};
 use crate::state::AppDb;
 use crate::storage::{messages as message_storage, sessions as session_storage};
 
@@ -107,22 +107,20 @@ pub async fn scan_sessions(
 
         total_sessions += 1;
 
-        // Check if we need to parse
-        let conn = db.0.lock().map_err(|e| e.to_string())?;
-        let existing = session_storage::get_session(&conn, &session_id).map_err(|e| e.to_string())?;
+        // Check if we need to parse (short lock)
+        let existing = {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            session_storage::get_session(&conn, &session_id).map_err(|e| e.to_string())?
+        };
 
         let needs_parse = force
             || existing.is_none()
             || existing.as_ref().map(|s| s.last_modified < last_modified).unwrap_or(true);
 
         if needs_parse {
-            // Parse the file
-            let (line_count, message_count, first_human_message, type_string) =
-                get_file_stats(path).map_err(|e| e.to_string())?;
-
-            // Parse messages for storage
-            let messages = parse_jsonl_file(path).map_err(|e| e.to_string())?;
-            let tree_count = count_trees(&messages);
+            // Parse outside the lock (most expensive part)
+            let parse_result = parse_jsonl_file_with_stats(path).map_err(|e| e.to_string())?;
+            let tree_count = count_trees(&parse_result.messages);
 
             // Create session metadata
             let now = chrono::Utc::now();
@@ -132,14 +130,14 @@ pub async fn scan_sessions(
                 id: session_id.clone(),
                 encoded_dir: encoded_dir.clone(),
                 directory,
-                line_count,
-                message_count,
-                first_human_message,
+                line_count: parse_result.line_count,
+                message_count: parse_result.message_count,
+                first_human_message: parse_result.first_human_message,
                 last_modified,
                 parsed_at: Some(now.timestamp()),
                 file_size,
                 tree_count,
-                type_string: Some(type_string),
+                type_string: Some(parse_result.type_string),
                 created_at: if existing.is_none() {
                     Some(timestamp_str.clone())
                 } else {
@@ -148,11 +146,11 @@ pub async fn scan_sessions(
                 updated_at: Some(timestamp_str),
             };
 
-            // Store session
+            // Store in DB (lock only for writes)
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
             session_storage::upsert_session(&conn, &session).map_err(|e| e.to_string())?;
-
-            // Store messages
-            message_storage::store_messages(&conn, &session_id, &messages).map_err(|e| e.to_string())?;
+            message_storage::store_messages(&conn, &session_id, &parse_result.messages).map_err(|e| e.to_string())?;
+            drop(conn);
 
             if existing.is_none() {
                 new_sessions += 1;
@@ -160,8 +158,6 @@ pub async fn scan_sessions(
                 updated_sessions += 1;
             }
         }
-
-        drop(conn);
     }
 
     // Clean up deleted sessions
@@ -339,9 +335,9 @@ pub async fn import_roam(
 
         // Parse and store in database
         let path = PathBuf::from(&target_file);
-        match (get_file_stats(&path), parse_jsonl_file(&path)) {
-            (Ok((line_count, message_count, first_human_message, type_string)), Ok(messages)) => {
-                let tree_count = count_trees(&messages);
+        match parse_jsonl_file_with_stats(&path) {
+            Ok(parse_result) => {
+                let tree_count = count_trees(&parse_result.messages);
                 let now = chrono::Utc::now();
                 let timestamp_str = now.format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
@@ -357,21 +353,21 @@ pub async fn import_roam(
                     id: session.id.clone(),
                     encoded_dir: encoded_dir.clone(),
                     directory: bundle.source.original_path.clone(),
-                    line_count,
-                    message_count,
-                    first_human_message,
+                    line_count: parse_result.line_count,
+                    message_count: parse_result.message_count,
+                    first_human_message: parse_result.first_human_message,
                     last_modified,
                     parsed_at: Some(now.timestamp()),
                     file_size,
                     tree_count,
-                    type_string: Some(type_string),
+                    type_string: Some(parse_result.type_string),
                     created_at: Some(timestamp_str.clone()),
                     updated_at: Some(timestamp_str),
                 };
 
                 let conn = db.0.lock().map_err(|e| e.to_string())?;
                 session_storage::upsert_session(&conn, &session_meta).map_err(|e| e.to_string())?;
-                message_storage::store_messages(&conn, &session.id, &messages).map_err(|e| e.to_string())?;
+                message_storage::store_messages(&conn, &session.id, &parse_result.messages).map_err(|e| e.to_string())?;
             }
             _ => {
                 log::warn!("Failed to parse imported session: {}", session.id);

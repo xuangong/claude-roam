@@ -3,7 +3,7 @@
  * Provides a native desktop experience with file watching and SQLite storage
  */
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import {
   isTauri,
   listSessions,
@@ -18,6 +18,8 @@ import SessionDetail from './pages/SessionDetail'
 import './App.css'
 
 type Theme = 'light' | 'dark'
+type SortKey = 'time' | 'size' | 'messages'
+type SortDir = 'asc' | 'desc'
 
 // Session list component for Tauri
 function TauriSessionList({
@@ -37,6 +39,41 @@ function TauriSessionList({
   onImport: () => void
   theme: Theme
 }) {
+  const [sortKey, setSortKey] = useState<SortKey>('time')
+  const [sortDir, setSortDir] = useState<SortDir>('desc')
+  const [filterText, setFilterText] = useState('')
+
+  const toggleSort = (key: SortKey) => {
+    if (sortKey === key) {
+      setSortDir(d => d === 'desc' ? 'asc' : 'desc')
+    } else {
+      setSortKey(key)
+      setSortDir('desc')
+    }
+  }
+
+  const sortedSessions = useMemo(() => {
+    let filtered = sessions
+    if (filterText.trim()) {
+      const q = filterText.toLowerCase()
+      filtered = sessions.filter(s =>
+        (s.firstHumanMessage || '').toLowerCase().includes(q) ||
+        s.directory.toLowerCase().includes(q) ||
+        s.id.toLowerCase().includes(q)
+      )
+    }
+
+    const sorted = [...filtered].sort((a, b) => {
+      let cmp = 0
+      switch (sortKey) {
+        case 'time': cmp = a.lastModified - b.lastModified; break
+        case 'size': cmp = a.fileSize - b.fileSize; break
+        case 'messages': cmp = a.messageCount - b.messageCount; break
+      }
+      return sortDir === 'desc' ? -cmp : cmp
+    })
+    return sorted
+  }, [sessions, sortKey, sortDir, filterText])
   const formatDate = (timestamp: number) => {
     const date = new Date(timestamp * 1000)
     return date.toLocaleDateString() + ' ' + date.toLocaleTimeString()
@@ -64,14 +101,46 @@ function TauriSessionList({
           </button>
         </div>
       </div>
+      <div className="session-list-toolbar">
+        <input
+          className="session-filter-input"
+          type="text"
+          placeholder="Filter..."
+          value={filterText}
+          onChange={e => setFilterText(e.target.value)}
+        />
+        <div className="session-sort-btns">
+          <button
+            className={`sort-btn ${sortKey === 'time' ? 'active' : ''}`}
+            onClick={() => toggleSort('time')}
+            title="Sort by time"
+          >
+            🕐{sortKey === 'time' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
+          </button>
+          <button
+            className={`sort-btn ${sortKey === 'size' ? 'active' : ''}`}
+            onClick={() => toggleSort('size')}
+            title="Sort by file size"
+          >
+            📦{sortKey === 'size' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
+          </button>
+          <button
+            className={`sort-btn ${sortKey === 'messages' ? 'active' : ''}`}
+            onClick={() => toggleSort('messages')}
+            title="Sort by message count"
+          >
+            💬{sortKey === 'messages' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
+          </button>
+        </div>
+      </div>
       <div className="session-list-content">
-        {sessions.length === 0 ? (
+        {sortedSessions.length === 0 ? (
           <div className="empty-state">
-            <p>No sessions found</p>
-            <p className="hint">Claude Code sessions will appear here</p>
+            <p>{filterText ? 'No matching sessions' : 'No sessions found'}</p>
+            <p className="hint">{filterText ? 'Try a different search' : 'Claude Code sessions will appear here'}</p>
           </div>
         ) : (
-          sessions.map((session) => (
+          sortedSessions.map((session) => (
             <div
               key={session.id}
               className={`session-item ${selectedId === session.id ? 'selected' : ''}`}

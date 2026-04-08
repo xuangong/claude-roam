@@ -91,6 +91,7 @@ export interface SessionAnalysis {
   treeCount: number
   timeSpan: TimeSpan | null
   topToolsByUsage: { name: string; count: number }[]
+  tokenUsage: TokenUsage | null
 }
 
 export interface ToolCallStat {
@@ -104,6 +105,14 @@ export interface TimeSpan {
   start: string
   end: string
   durationMinutes: number
+}
+
+// Token usage
+export interface TokenUsage {
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheCreationTokens: number
 }
 
 // Session change event
@@ -343,6 +352,7 @@ function normalizeMessage(msg: DisplayMessage): DisplayMessage {
     tool_result: 'tool_result',
     thinking: 'system',
     code_result: 'system',
+    error: 'error',
   }
 
   const displayType = typeMapping[msg.displayType as string] || msg.displayType

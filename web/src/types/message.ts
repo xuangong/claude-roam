@@ -28,7 +28,7 @@ export interface JsonBlock {
 export type ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock | JsonBlock
 
 // Display types for the terminal
-export type DisplayType = 'human' | 'assistant' | 'tool_call' | 'tool_result' | 'system' | 'tree-separator'
+export type DisplayType = 'human' | 'assistant' | 'tool_call' | 'tool_result' | 'system' | 'tree-separator' | 'error'
 
 // Unified display message interface
 export interface DisplayMessage {

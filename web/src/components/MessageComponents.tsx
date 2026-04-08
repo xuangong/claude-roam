@@ -346,6 +346,47 @@ export function AssistantDisplay({ blocks, searchQuery, highlightClass, nav, typ
 }
 
 // ============================================================================
+// Error Display - shows API errors (api_error system messages)
+// ============================================================================
+
+interface ErrorDisplayProps {
+  blocks: ContentBlock[]
+  searchQuery?: string
+  highlightClass?: string
+  nav?: { messageIndex: number; typeString: string; onScrollToMessage: (index: number) => void }
+  typeChar?: string
+  rawData?: Record<string, unknown>
+}
+
+export function ErrorDisplay({ blocks, searchQuery, highlightClass, nav, typeChar, rawData }: ErrorDisplayProps) {
+  const [isExpanded, setIsExpanded] = useState(false)
+  const [showRaw, setShowRaw] = useState(false)
+  const textContent = blocks.find(b => b.type === 'text')?.content || ''
+  const jsonContent = blocks.find(b => b.type === 'json')?.content
+
+  return (
+    <div className={`error-block${highlightClass || ''}`}>
+      <div className="error-block-header" onClick={() => setIsExpanded(!isExpanded)}>
+        <span className="error-block-icon">&#x26A0;</span>
+        <span className="error-block-label">API Error</span>
+        {nav && typeChar && <TypeNav messageIndex={nav.messageIndex} typeString={nav.typeString} typeChar={typeChar} onScrollToMessage={nav.onScrollToMessage} />}
+        {rawData && <RawButton active={showRaw} onClick={() => setShowRaw(!showRaw)} />}
+        <span className="error-block-summary">
+          {searchQuery ? highlightText(textContent, searchQuery) : textContent}
+        </span>
+        <span className="error-block-expand">{isExpanded ? '\u25B2' : '\u25BC'}</span>
+      </div>
+      {isExpanded && jsonContent && (
+        <pre className="error-block-content">
+          {jsonContent}
+        </pre>
+      )}
+      {showRaw && rawData && <RawJsonBlock raw={rawData} />}
+    </div>
+  )
+}
+
+// ============================================================================
 // Unified Message Row Component
 // ============================================================================
 
@@ -415,6 +456,9 @@ export function MessageRow({ msg, searchQuery, isSearchMatch, messageIndex, type
 
     case 'system':
       return <SystemDisplay blocks={msg.blocks} searchQuery={query} raw={msg.raw} />
+
+    case 'error':
+      return <ErrorDisplay blocks={msg.blocks} searchQuery={query} highlightClass={highlightClass} nav={navProps} typeChar="e" rawData={rawData} />
 
     default:
       return null
