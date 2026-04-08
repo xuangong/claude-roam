@@ -59,6 +59,8 @@ Claude Roam includes a native **Tauri 2 desktop app** built to handle **extremel
 - **MiniMap with Filters**: Visual overview with clickable color filters by message type
 - **MiniMap Tooltips**: Hover over color bars for message type and count details
 - **Type Navigation**: Jump between same-type messages (human/assistant/tool) with prev/next arrows
+- **Directory Tree View**: Browse sessions organized by project directory with collapsible folder tree
+- **Resizable Sidebar**: Drag to resize the session list panel, width persists across sessions
 - **Token Usage Stats**: Per-session token consumption (input, output, cache read/creation)
 - **Session List Filter & Sort**: Filter sessions by keyword, sort by time, size, or message count
 - **Responsive Layout**: Header gracefully adapts to narrow widths, prioritizing actions over timestamps
@@ -86,6 +88,8 @@ Your conversations with Claude are valuable knowledge assets:
 - **Virtual Scrolling**: Full-screen conversation view with smooth navigation
 - **MiniMap with Filters**: Visual overview with message type color filters and hover tooltips
 - **Type Navigation**: Jump between same-type messages with prev/next arrows
+- **Directory Tree View**: Collapsible folder tree for browsing sessions by project directory
+- **Resizable Sidebar**: Drag to adjust session list width, persists across sessions
 - **Token Usage Stats**: Per-session token consumption breakdown (input, output, cache)
 - **Session List Filter & Sort**: Filter by keyword, sort by time/size/message count
 - **Responsive Layout**: Adaptive header that prioritizes actions over timestamps

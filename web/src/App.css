@@ -2133,9 +2133,8 @@ input::placeholder {
 
 /* Session list in Tauri */
 .session-list {
-  width: 320px;
-  min-width: 280px;
-  max-width: 400px;
+  width: 100%;
+  height: 100%;
   background: var(--bg-secondary);
   display: flex;
   flex-direction: column;
@@ -2211,8 +2210,39 @@ input::placeholder {
 
 .session-sort-btns {
   display: flex;
+  align-items: center;
   gap: 2px;
   flex-shrink: 0;
+}
+
+.mode-btn {
+  padding: 2px 6px;
+  font-size: 13px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  cursor: pointer;
+  white-space: nowrap;
+  line-height: 1.4;
+  font-weight: 500;
+}
+
+.mode-btn:hover {
+  background: var(--bg-hover);
+}
+
+.mode-btn.active {
+  background: var(--accent);
+  color: var(--bg-primary);
+  border-color: var(--accent);
+}
+
+.sort-divider {
+  width: 1px;
+  height: 16px;
+  background: var(--border-default);
+  margin: 0 3px;
 }
 
 .sort-btn {
@@ -2297,6 +2327,31 @@ input::placeholder {
   display: flex;
   flex-direction: column;
   position: relative;
+  min-width: 0;
+}
+
+/* Resize handle between session list and detail */
+.resize-handle {
+  width: 4px;
+  cursor: col-resize;
+  background: transparent;
+  flex-shrink: 0;
+  position: relative;
+  z-index: 10;
+  transition: background 0.15s;
+}
+
+.resize-handle:hover {
+  background: var(--accent-color, #007aff);
+}
+
+.resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -3px;
+  right: -3px;
 }
 
 /* In Tauri mode, minimap should be absolute within the conversation container */
@@ -2515,4 +2570,110 @@ input::placeholder {
     -webkit-backdrop-filter: blur(10px);
     backdrop-filter: blur(10px);
   }
+}
+
+/* Directory tree view */
+.dir-tree-node {
+  border-bottom: 1px solid var(--border-muted);
+}
+
+.dir-tree-node:last-child {
+  border-bottom: none;
+}
+
+.dir-tree-node .dir-tree-node {
+  border-bottom: none;
+}
+
+.dir-tree-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  cursor: pointer;
+  user-select: none;
+  transition: background var(--transition-fast);
+}
+
+.dir-tree-header:hover {
+  background: var(--bg-hover);
+}
+
+.dir-tree-header .toggle-icon {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  width: 12px;
+  flex-shrink: 0;
+}
+
+.dir-tree-name {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+/* Directory tree view in Tauri sidebar */
+.session-list-content .folder-group {
+  border-bottom: 1px solid var(--border-muted);
+}
+
+.session-list-content .folder-group:last-child {
+  border-bottom: none;
+}
+
+.session-list-content .folder-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-3);
+  cursor: pointer;
+  user-select: none;
+  font-size: 13px;
+  transition: background var(--transition-fast);
+}
+
+.session-list-content .folder-header:hover {
+  background: var(--bg-hover);
+}
+
+.session-list-content .folder-header .toggle-icon {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  width: 14px;
+  flex-shrink: 0;
+}
+
+.session-list-content .folder-header .folder-name {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.session-list-content .folder-header .folder-count {
+  color: var(--text-muted);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.session-list-content .folder-sessions {
+  padding-left: var(--space-2);
+}
+
+.session-list-content .folder-sessions .session-item {
+  padding-left: var(--space-4);
+}
+
+.session-list-content .folder-loading {
+  padding: var(--space-3) var(--space-5);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-style: italic;
 }
