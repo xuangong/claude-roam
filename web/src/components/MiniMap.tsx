@@ -56,12 +56,39 @@ export function MiniMap({
 
   const [position, setPosition] = useState(() => {
     const saved = localStorage.getItem('minimap-position')
-    return saved ? JSON.parse(saved) : { top: 200, right: 24 }
+    const pos = saved ? JSON.parse(saved) : { top: 200, right: 24 }
+    // Clamp top so minimap doesn't start below window
+    pos.top = Math.max(0, Math.min(pos.top, window.innerHeight - 100))
+    return pos
   })
+  const clampHeight = useCallback((h: number) => {
+    const maxH = window.innerHeight - 50
+    return Math.min(maxH, Math.max(100, h))
+  }, [])
+
   const [height, setHeight] = useState(() => {
     const saved = localStorage.getItem('minimap-height')
-    return saved ? parseInt(saved) : 500
+    const h = saved ? parseInt(saved) : 500
+    const maxH = window.innerHeight - 50
+    return Math.min(maxH, Math.max(100, h))
   })
+
+  // Auto-clamp height and position on window resize
+  useEffect(() => {
+    const onResize = () => {
+      setHeight(prev => {
+        const clamped = clampHeight(prev)
+        // Also clamp position so minimap bottom doesn't exceed window
+        setPosition((p: { top: number; right: number }) => {
+          const maxTop = Math.max(0, window.innerHeight - clamped)
+          return p.top > maxTop ? { ...p, top: maxTop } : p
+        })
+        return clamped
+      })
+    }
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [clampHeight])
 
   useEffect(() => {
     localStorage.setItem('minimap-position', JSON.stringify(position))
@@ -133,14 +160,19 @@ export function MiniMap({
     const handleGlobalMouseMove = (e: MouseEvent) => {
       if (isResizing.current && minimapRef.current) {
         const rect = minimapRef.current.getBoundingClientRect()
-        const newHeight = Math.max(100, Math.min(window.innerHeight - 50, e.clientY - rect.top))
+        const newHeight = clampHeight(e.clientY - rect.top)
         setHeight(newHeight)
+        // If bottom would exceed window, push top up
+        setPosition((prev: { top: number; right: number }) => {
+          const maxTop = Math.max(0, window.innerHeight - newHeight)
+          return prev.top > maxTop ? { ...prev, top: maxTop } : prev
+        })
       }
       if (isResizingTop.current) {
         const delta = e.clientY - resizeTopStart.current.y
         const bottom = resizeTopStart.current.top + resizeTopStart.current.height
         const clampedTop = Math.max(0, resizeTopStart.current.top + delta)
-        const newHeight = Math.max(100, bottom - clampedTop)
+        const newHeight = clampHeight(bottom - clampedTop)
         setHeight(newHeight)
         setPosition((prev: { top: number; right: number }) => ({ ...prev, top: clampedTop }))
       }
@@ -150,7 +182,7 @@ export function MiniMap({
         const newTop = e.clientY - container.top - dragOffset.current.y
         const newRight = container.width - (e.clientX - container.left) - (60 - dragOffset.current.x)
         setPosition({
-          top: Math.max(0, Math.min(container.height - h, newTop)),
+          top: Math.max(0, Math.min(Math.min(container.height - h, window.innerHeight - h), newTop)),
           right: Math.max(0, Math.min(container.width - 100, newRight))
         })
       }
@@ -169,7 +201,7 @@ export function MiniMap({
       window.removeEventListener('mouseup', handleGlobalMouseUp)
       window.removeEventListener('mousemove', handleGlobalMouseMove)
     }
-  }, [onNavigate, getContainerBounds])
+  }, [onNavigate, getContainerBounds, clampHeight])
 
   const [contentRect, setContentRect] = useState({ top: 56, height: height - 76 })
 
